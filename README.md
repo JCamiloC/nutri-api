@@ -3,37 +3,64 @@
 API Node (Express + TypeScript) para **Enerxis NutriLab**.  
 Repo: [JCamiloC/nutri-api](https://github.com/JCamiloC/nutri-api).
 
-## Enfoque de BD
+## Requisitos
 
-**Postgres en el servidor (VPS)** — no dependemos de Docker local.
+- Node.js 20+
+- Docker Desktop (para Postgres local en cualquier PC)
 
-1. Clona este repo en el VPS.
-2. Crea Postgres (mismo VPS o managed).
-3. Copia `.env.example` → `.env` y configura `DATABASE_URL`.
-4. `npm ci && npm run db:migrate && npm run build && npm start`
-
-## Arranque
+## Arranque en un PC nuevo (clonar y levantar)
 
 ```bash
+git clone https://github.com/JCamiloC/nutri-api.git
+cd nutri-api
+cp .env.example .env
 npm ci
-cp .env.example .env   # editar DATABASE_URL, PORT, CORS_ORIGIN
-npm run db:migrate
-npm run dev            # http://localhost:4000
+npm run db:setup    # levanta Postgres en Docker + aplica schema
+npm run dev         # http://localhost:4000
 ```
 
-Sin BD puedes probar el motor:
+Verifica:
 
 ```bash
+curl http://127.0.0.1:4000/health
 npm run test:engine
 ```
+
+Credenciales locales por defecto (`.env.example`):
+
+```text
+postgresql://nutri:nutri@127.0.0.1:5432/nutri_lab
+```
+
+### Comandos Docker útiles
+
+| Script | Qué hace |
+|--------|----------|
+| `npm run db:up` | Solo levanta el contenedor |
+| `npm run db:setup` | Up + espera + migrate |
+| `npm run db:migrate` | Reaplica `sql/001_init.sql` (idempotente) |
+| `npm run db:down` | Para el contenedor (conserva datos) |
+| `npm run db:reset` | Borra volumen y recrea BD limpia |
+| `npm run db:logs` | Logs de Postgres |
+
+## VPS / producción
+
+Usa Postgres del servidor (sin Docker si prefieres). En `.env`:
+
+```text
+DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/nutri_lab
+```
+
+Luego: `npm ci && npm run db:migrate && npm run build && npm start`
 
 ## Endpoints
 
 | Método | Ruta | Notas |
 |--------|------|--------|
 | GET | `/health` | Estado API + DB |
-| POST | `/v1/recalculate` | Motor nutricional (sin persistencia) |
+| POST | `/v1/recalculate` | Motor nutricional |
 
 ## Schema
 
-`sql/001_init.sql`: labs, users, icbf_foods, ingredients, formulas, formula_lines, audit_events.
+`sql/001_init.sql`: labs, users, icbf_foods, ingredients, formulas, formula_lines, audit_events.  
+También se monta en `docker-entrypoint-initdb.d` la primera vez que se crea el volumen.
