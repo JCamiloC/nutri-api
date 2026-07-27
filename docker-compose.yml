@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nutri-api-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: nutri
+      POSTGRES_PASSWORD: nutri
+      POSTGRES_DB: nutri_lab
+    volumes:
+      - nutri_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nutri -d nutri_lab"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  nutri_pg_data:

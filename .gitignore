@@ -1,0 +1,13 @@
+# nutri-api — API Node del SaaS NutriLab
+# Este directorio NO se versiona en nutri-saas (ver .gitignore del front).
+# Inicializa su propio repo Git dentro de esta carpeta.
+
+node_modules/
+dist/
+coverage/
+.env
+.env.local
+*.log
+.DS_Store
+tmp/
+uploads/
