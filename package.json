@@ -15,6 +15,7 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "db:setup": "docker compose up -d && tsx src/db/wait-and-migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
+    "db:import-sample": "tsx src/db/import-enerxis-sample.ts",
     "test:engine": "tsx src/nutrition-engine/smoke.ts"
   },
   "engines": {
@@ -32,6 +33,7 @@
     "@types/express": "^4.17.21",
     "@types/node": "^22.13.10",
     "@types/pg": "^8.11.11",
+    "mysql2": "^3.23.2",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
   }
