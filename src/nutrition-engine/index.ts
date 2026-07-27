@@ -142,6 +142,7 @@ export type NutrientProfile = Partial<Record<string, number>> & {
   energiaKcal?: number;
   grasas?: number;
   vitaminas?: Array<{ nombre: string; valor: number }>;
+  alergenos?: Record<string, unknown>;
 };
 
 export interface FormulaLine {

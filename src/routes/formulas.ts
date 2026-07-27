@@ -1,7 +1,13 @@
 import { Router } from "express";
 import { z } from "zod";
 import { getPool } from "../db/pool.js";
+import { ingredientToPer100g } from "../lib/ingredient-profile.js";
 import { mapFormula, mapFormulaLine, resolveLabId } from "../lib/mappers.js";
+import {
+  recalculateFormula,
+  type FormulaType,
+  type IngredientSource,
+} from "../nutrition-engine/index.js";
 
 export const formulasRouter = Router();
 
@@ -283,5 +289,78 @@ formulasRouter.delete("/v1/formulas/:id", async (req, res) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return res.status(500).json({ error: "delete_formula_failed", message });
+  }
+});
+
+/** Recalcula una fórmula guardada usando nutrientes de ingredients en BD. */
+formulasRouter.post("/v1/formulas/:id/recalculate", async (req, res) => {
+  try {
+    const labId = resolveLabId(req);
+    const pool = getPool();
+    const formulaRes = await pool.query(
+      `SELECT * FROM formulas WHERE id = $1 AND lab_id = $2`,
+      [req.params.id, labId],
+    );
+    if (!formulaRes.rows[0]) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    const formula = formulaRes.rows[0];
+
+    const linesRes = await pool.query(
+      `SELECT * FROM formula_lines WHERE formula_id = $1 ORDER BY sort_order ASC`,
+      [req.params.id],
+    );
+    if (linesRes.rows.length === 0) {
+      return res.status(400).json({ error: "formula_has_no_lines" });
+    }
+
+    const engineLines: Array<{
+      source: IngredientSource;
+      name: string;
+      percent: number;
+      per100g: ReturnType<typeof ingredientToPer100g>;
+    }> = [];
+
+    for (const line of linesRes.rows) {
+      let per100g = ingredientToPer100g({});
+      if (line.ingredient_id) {
+        const ing = await pool.query(
+          `SELECT * FROM ingredients WHERE id = $1 AND lab_id = $2`,
+          [line.ingredient_id, labId],
+        );
+        if (ing.rows[0]) {
+          per100g = ingredientToPer100g(ing.rows[0]);
+        }
+      }
+
+      engineLines.push({
+        source: line.source as IngredientSource,
+        name: String(line.name),
+        percent: Number(line.percent) || 0,
+        per100g,
+      });
+    }
+
+    const result = recalculateFormula({
+      packageWeight: Number(formula.package_weight) || 100,
+      reconstitutedServing: Number(formula.reconstituted_serving) || 0,
+      formulaType: (formula.formula_type as FormulaType) || "Solido",
+      lines: engineLines,
+    });
+
+    return res.json({
+      formulaId: formula.id,
+      title: formula.title,
+      productName: formula.product_name,
+      brand: formula.brand,
+      formulaType: formula.formula_type,
+      packageWeight: Number(formula.package_weight),
+      servings: Number(formula.servings),
+      servingSize: Number(formula.serving_size),
+      ...result,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ error: "recalculate_formula_failed", message });
   }
 });
