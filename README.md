@@ -59,6 +59,16 @@ Luego: `npm ci && npm run db:migrate && npm run build && npm start`
 |--------|------|--------|
 | GET | `/health` | Estado API + DB |
 | POST | `/v1/recalculate` | Motor nutricional |
+| GET/POST | `/v1/formulas` | Listar / crear fórmulas |
+| GET/PATCH/DELETE | `/v1/formulas/:id` | Detalle / actualizar / borrar |
+| GET/POST | `/v1/ingredients` | Inventario del lab |
+| GET | `/v1/ingredients/:id` | Detalle ingrediente |
+
+Header opcional: `X-Lab-Id` (default: lab demo).
+
+```bash
+npm run db:seed   # fórmula demo + 2 ingredientes
+```
 
 ## Schema
 

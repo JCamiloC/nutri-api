@@ -7,8 +7,12 @@ import {
   type FormulaType,
   type IngredientSource,
 } from "../nutrition-engine/index.js";
+import { formulasRouter } from "./formulas.js";
+import { ingredientsRouter } from "./ingredients.js";
 
 export const router = Router();
+router.use(formulasRouter);
+router.use(ingredientsRouter);
 
 router.get("/health", async (_req, res) => {
   const db = await checkDatabase();
