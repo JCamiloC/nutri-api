@@ -14,6 +14,8 @@ export const env = {
   corsOrigin: process.env.CORS_ORIGIN ?? "http://localhost:3002",
   databaseUrl: process.env.DATABASE_URL ?? "",
   usdaApiKey: process.env.USDA_API_KEY ?? "",
+  jwtSecret: process.env.JWT_SECRET ?? "nutri-dev-secret-change-me",
+  jwtExpiresIn: process.env.JWT_EXPIRES_IN ?? "7d",
 };
 
 export function assertDatabaseUrl(): string {

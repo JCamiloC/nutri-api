@@ -2,17 +2,20 @@ import { Router } from "express";
 import { z } from "zod";
 import { checkDatabase } from "../db/pool.js";
 import { getPool } from "../db/pool.js";
+import { validateFormulaDraft } from "../lib/formula-validation.js";
+import { requireAuth } from "../middleware/auth.js";
 import {
   recalculateFormula,
   type FormulaType,
   type IngredientSource,
 } from "../nutrition-engine/index.js";
+import { authRouter } from "./auth.js";
 import { formulasRouter } from "./formulas.js";
 import { ingredientsRouter } from "./ingredients.js";
+import { labRouter } from "./lab.js";
+import { plansRouter } from "./plans.js";
 
 export const router = Router();
-router.use(formulasRouter);
-router.use(ingredientsRouter);
 
 router.get("/health", async (_req, res) => {
   const db = await checkDatabase();
@@ -38,6 +41,12 @@ router.get("/health", async (_req, res) => {
     time: new Date().toISOString(),
   });
 });
+
+router.use(authRouter);
+router.use(plansRouter);
+router.use(labRouter);
+router.use(formulasRouter);
+router.use(ingredientsRouter);
 
 const nutrientProfile = z
   .object({
@@ -82,11 +91,22 @@ const recalculateBody = z.object({
     .min(1),
 });
 
-/** Recálculo puro (sin persistencia). Compatible con reglas Enerxis. */
-router.post("/v1/recalculate", (req, res) => {
+/** Recálculo puro (sin persistencia). Compatible con reglas Enerxis. Requiere auth. */
+router.post("/v1/recalculate", requireAuth, (req, res) => {
   const parsed = recalculateBody.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+  }
+
+  const issues = validateFormulaDraft({
+    title: "preview",
+    formulaType: parsed.data.formulaType ?? "Solido",
+    lines: parsed.data.lines,
+    requireLines: true,
+    requireCompletePercent: true,
+  });
+  if (issues.length) {
+    return res.status(400).json({ error: "validation_failed", issues });
   }
 
   const result = recalculateFormula({
@@ -94,9 +114,10 @@ router.post("/v1/recalculate", (req, res) => {
     reconstitutedServing: parsed.data.reconstitutedServing,
     formulaType: parsed.data.formulaType as FormulaType | undefined,
     lines: parsed.data.lines.map((line) => ({
-      ...line,
       source: line.source as IngredientSource,
-      per100g: line.per100g,
+      name: line.name,
+      percent: line.percent,
+      per100g: line.per100g as never,
     })),
   });
 

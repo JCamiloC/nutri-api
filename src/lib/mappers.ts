@@ -1,11 +1,28 @@
 import type { Request } from "express";
 import { DEMO_LAB_ID } from "../config/constants.js";
 
-/** Mientras no hay auth JWT, el lab se toma del header o del demo. */
+/**
+ * Lab efectivo:
+ * - lab_admin / lab_reader → siempre su lab_id del token
+ * - superadmin → query/header x-lab-id opcional, si no demo lab
+ */
 export function resolveLabId(req: Request): string {
-  const header = req.header("x-lab-id");
-  if (header && /^[0-9a-f-]{36}$/i.test(header)) return header;
-  return DEMO_LAB_ID;
+  if (req.user?.role === "superadmin") {
+    const fromQuery = typeof req.query.labId === "string" ? req.query.labId : "";
+    const fromHeader = req.header("x-lab-id") ?? "";
+    const candidate = fromQuery || fromHeader;
+    if (candidate && /^[0-9a-f-]{36}$/i.test(candidate)) return candidate;
+    return DEMO_LAB_ID;
+  }
+
+  if (req.user?.labId && /^[0-9a-f-]{36}$/i.test(req.user.labId)) {
+    return req.user.labId;
+  }
+
+  throw Object.assign(new Error("Usuario sin laboratorio asignado"), {
+    status: 403,
+    code: "lab_required",
+  });
 }
 
 export function mapFormula(row: Record<string, unknown>) {
@@ -25,6 +42,7 @@ export function mapFormula(row: Record<string, unknown>) {
     formulaType: row.formula_type,
     ingredientCount: Number(row.ingredient_count),
     showLogo: row.show_logo,
+    showWatermark: row.show_watermark !== false,
     sweetener: row.sweetener,
     rsa: row.rsa,
     flavor: row.flavor,
