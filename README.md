@@ -38,7 +38,7 @@ postgresql://nutri:nutri@127.0.0.1:5432/nutri_lab
 |--------|----------|
 | `npm run db:up` | Solo levanta el contenedor |
 | `npm run db:setup` | Up + espera + migrate |
-| `npm run db:migrate` | Reaplica `sql/001_init.sql` (idempotente) |
+| `npm run db:migrate` | Aplica `sql/*.sql` nuevos vía `schema_migrations` |
 | `npm run db:down` | Para el contenedor (conserva datos) |
 | `npm run db:reset` | Borra volumen y recrea BD limpia |
 | `npm run db:logs` | Logs de Postgres |
@@ -52,6 +52,22 @@ DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/nutri_lab
 ```
 
 Luego: `npm ci && npm run db:migrate && npm run build && npm start`
+
+Detalle del webhook, orden de deploy y bootstrap de migraciones: ver [DEPLOY.md](./DEPLOY.md).
+
+### Migraciones
+
+Los archivos en `sql/` se aplican **una sola vez**, registrados en `schema_migrations`.
+
+- Primera corrida en BD vacía: aplica todos los `.sql` en orden.
+- Primera corrida en BD ya poblada (p. ej. ya existía `labs`): **bootstrap** — marca los SQL actuales como applied sin re-ejecutarlos; solo correrán archivos nuevos después.
+- Fallo en un archivo: rollback de esa migración, no se marca, exit code ≠ 0.
+
+```bash
+npm run db:migrate
+```
+
+No correr `db:seed` automáticamente en producción.
 
 ## Endpoints
 
@@ -73,4 +89,5 @@ npm run db:seed   # fórmula demo + 2 ingredientes
 ## Schema
 
 `sql/001_init.sql`: labs, users, icbf_foods, ingredients, formulas, formula_lines, audit_events.  
-También se monta en `docker-entrypoint-initdb.d` la primera vez que se crea el volumen.
+Tracking de migraciones: tabla `schema_migrations` (gestionada por `npm run db:migrate`).  
+También se monta en `docker-entrypoint-initdb.d` la primera vez que se crea el volumen Docker.
