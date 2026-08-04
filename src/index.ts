@@ -9,9 +9,23 @@ const app = express();
 
 fs.mkdirSync(uploadsRoot(), { recursive: true });
 
+/** CORS_ORIGIN puede ser un origen o varios separados por coma. */
+const corsOrigins = env.corsOrigin
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 app.use(
   cors({
-    origin: env.corsOrigin,
+    origin(origin, callback) {
+      // Requests sin Origin (curl, health checks, same-origin server tools)
+      if (!origin) return callback(null, true);
+      if (corsOrigins.includes("*") || corsOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      console.warn(`[cors] blocked origin: ${origin}`);
+      return callback(null, false);
+    },
   }),
 );
 app.use(express.json({ limit: "3mb" }));
@@ -23,8 +37,8 @@ app.use((_req, res) => {
 });
 
 app.listen(env.port, () => {
-  console.log(`[nutri-api] listening on http://localhost:${env.port}`);
-  console.log(`[nutri-api] CORS origin: ${env.corsOrigin}`);
+  console.log(`[nutri-api] listening on http://0.0.0.0:${env.port}`);
+  console.log(`[nutri-api] CORS origins: ${corsOrigins.join(" | ")}`);
   if (!env.databaseUrl) {
     console.warn("[nutri-api] DATABASE_URL vacía — /health reportará degraded");
   }
