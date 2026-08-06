@@ -138,9 +138,12 @@ export const VITAMIN_NAME_ALIASES: Record<string, string> = {
   boro: "boro",
 };
 
-export type NutrientProfile = Partial<Record<string, number>> & {
+export type NutrientProfile = {
+  /** Macros / micros numéricos por 100 g (campos Enerxis flexibles). */
+  [key: string]: number | Array<{ nombre: string; valor: number }> | Record<string, unknown> | undefined;
   energiaKcal?: number;
   grasas?: number;
+  grasa?: number;
   vitaminas?: Array<{ nombre: string; valor: number }>;
   alergenos?: Record<string, unknown>;
 };
