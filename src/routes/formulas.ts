@@ -175,15 +175,8 @@ formulasRouter.post("/v1/formulas", requireAuth, requireWrite, async (req, res) 
     });
   }
 
-  const capacity = await getLabCapacity(labId);
-  if (!capacity || capacity.remaining <= 0) {
-    return res.status(403).json({
-      error: "quota_exceeded",
-      message: `Cupo de tablas agotado (${capacity?.used ?? 0}/${capacity?.total ?? 0}). Solicita un pack extra o un plan superior.`,
-      capacity,
-    });
-  }
-
+  // Crear no gasta cupo (cotización libre). El cupo se cobra al imprimir.
+  // No permitir marcar exportada en el alta.
   const pool = getPool();
   const client = await pool.connect();
 
@@ -207,10 +200,10 @@ formulasRouter.post("/v1/formulas", requireAuth, requireWrite, async (req, res) 
       RETURNING *`,
       [
         labId,
-        data.title,
+        data.title.trim(),
         data.productName ?? null,
         data.brand ?? null,
-        data.status ?? "borrador",
+        data.status && data.status !== "exportada" ? data.status : "borrador",
         data.packageWeight ?? 100,
         data.weightUnit ?? "g",
         data.servings ?? 1,
@@ -324,6 +317,15 @@ formulasRouter.patch("/v1/formulas/:id", requireAuth, requireWrite, async (req, 
     if (issues.length) {
       await client.query("ROLLBACK");
       return res.status(400).json({ error: "validation_failed", issues });
+    }
+
+    if (d.status === "exportada" && String(existing.rows[0].status) !== "exportada") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        error: "use_print_endpoint",
+        message:
+          "El cupo se cobra al imprimir/exportar. Usa POST /v1/formulas/:id/print",
+      });
     }
 
     if (d.title) {
@@ -545,5 +547,132 @@ formulasRouter.post("/v1/formulas/:id/recalculate", requireAuth, requireWrite, a
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return res.status(500).json({ error: "recalculate_formula_failed", message });
+  }
+});
+
+/**
+ * Emite el rotulado: 1.ª impresión gasta 1 cupo (status → exportada).
+ * Reimpresión de una ya exportada no vuelve a cobrar.
+ */
+formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (req, res) => {
+  try {
+    const labId = getLabId(req, res);
+    if (!labId) return;
+    const pool = getPool();
+    const formulaRes = await pool.query(
+      `SELECT * FROM formulas WHERE id = $1 AND lab_id = $2`,
+      [req.params.id, labId],
+    );
+    if (!formulaRes.rows[0]) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    const formula = formulaRes.rows[0];
+    const alreadyBilled = String(formula.status) === "exportada";
+
+    const linesRes = await pool.query(
+      `SELECT * FROM formula_lines WHERE formula_id = $1 ORDER BY sort_order ASC`,
+      [req.params.id],
+    );
+
+    const issues = validateFormulaDraft({
+      title: String(formula.title),
+      formulaType: String(formula.formula_type),
+      lines: linesRes.rows.map((r) => ({
+        name: String(r.name),
+        percent: Number(r.percent),
+      })),
+      requireLines: true,
+      requireCompletePercent: true,
+    });
+    if (issues.length) {
+      return res.status(400).json({ error: "validation_failed", issues });
+    }
+
+    if (!alreadyBilled) {
+      const capacity = await getLabCapacity(labId);
+      if (!capacity || capacity.remaining <= 0) {
+        return res.status(403).json({
+          error: "quota_exceeded",
+          message: `Cupo de impresión agotado (${capacity?.used ?? 0}/${capacity?.total ?? 0} emitidas). Solicita un pack extra o un plan superior. Las cotizaciones sin imprimir no gastan cupo.`,
+          capacity,
+        });
+      }
+    }
+
+    const engineLines: Array<{
+      source: IngredientSource;
+      name: string;
+      percent: number;
+      per100g: ReturnType<typeof ingredientToPer100g>;
+    }> = [];
+
+    for (const line of linesRes.rows) {
+      let per100g = ingredientToPer100g({});
+      if (line.ingredient_id) {
+        const ing = await pool.query(
+          `SELECT * FROM ingredients WHERE id = $1 AND lab_id = $2`,
+          [line.ingredient_id, labId],
+        );
+        if (ing.rows[0]) {
+          per100g = ingredientToPer100g(ing.rows[0]);
+        }
+      }
+      engineLines.push({
+        source: line.source as IngredientSource,
+        name: String(line.name),
+        percent: Number(line.percent) || 0,
+        per100g,
+      });
+    }
+
+    const result = recalculateFormula({
+      packageWeight: Number(formula.package_weight) || 100,
+      reconstitutedServing: Number(formula.reconstituted_serving) || 0,
+      formulaType: (formula.formula_type as FormulaType) || "Solido",
+      lines: engineLines,
+    });
+
+    let updated = formula;
+    if (!alreadyBilled) {
+      const up = await pool.query(
+        `UPDATE formulas SET status = 'exportada', updated_at = now()
+         WHERE id = $1 AND lab_id = $2
+         RETURNING *`,
+        [req.params.id, labId],
+      );
+      updated = up.rows[0] ?? formula;
+    }
+
+    const capacity = await getLabCapacity(labId);
+
+    await writeAudit(req, {
+      labId,
+      action: alreadyBilled ? "formula.reprint" : "formula.print",
+      detail: `${String(updated.title)}${alreadyBilled ? " (reimpresión)" : " (1 cupo)"}`,
+    });
+
+    return res.json({
+      formulaId: updated.id,
+      title: updated.title,
+      productName: updated.product_name,
+      brand: updated.brand,
+      formulaType: updated.formula_type,
+      packageWeight: Number(updated.package_weight),
+      servings: Number(updated.servings),
+      servingSize: Number(updated.serving_size),
+      status: updated.status,
+      billed: true,
+      firstBillablePrint: !alreadyBilled,
+      capacity,
+      formula: {
+        ...mapFormula(updated),
+        lines: linesRes.rows.map(mapFormulaLine),
+        labBranding: await loadLabBranding(labId, req),
+      },
+      ...result,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ error: "print_formula_failed", message });
   }
 });

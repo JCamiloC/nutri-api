@@ -46,7 +46,10 @@ export type LabCapacity = {
   tablesIncluded: number;
   tablesExtra: number;
   total: number;
+  /** Fórmulas ya impresas/exportadas (cobran 1 cupo). */
   used: number;
+  /** Borradores / listas sin imprimir (no gastan cupo). */
+  drafts: number;
   remaining: number;
   pct: number;
   renewsAt: string | null;
@@ -79,11 +82,16 @@ export async function getLabCapacity(labId: string): Promise<LabCapacity | null>
     if (planRes.rows[0]) plan = mapPlan(planRes.rows[0]);
   }
 
-  const usedRes = await pool.query(
-    `SELECT count(*)::int AS n FROM formulas WHERE lab_id = $1`,
+  const countRes = await pool.query(
+    `SELECT
+       count(*) FILTER (WHERE status = 'exportada')::int AS used,
+       count(*) FILTER (WHERE status IS DISTINCT FROM 'exportada')::int AS drafts
+     FROM formulas
+     WHERE lab_id = $1`,
     [labId],
   );
-  const used = Number(usedRes.rows[0]?.n ?? 0);
+  const used = Number(countRes.rows[0]?.used ?? 0);
+  const drafts = Number(countRes.rows[0]?.drafts ?? 0);
 
   const adminsRes = await pool.query(
     `SELECT count(*)::int AS n FROM users
@@ -105,6 +113,7 @@ export async function getLabCapacity(labId: string): Promise<LabCapacity | null>
     tablesExtra,
     total,
     used,
+    drafts,
     remaining,
     pct,
     renewsAt: formatDate(lab.renews_at),
