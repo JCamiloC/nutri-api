@@ -10,10 +10,12 @@ import {
   type IngredientSource,
 } from "../nutrition-engine/index.js";
 import { authRouter } from "./auth.js";
+import { auditRouter } from "./audit.js";
 import { formulasRouter } from "./formulas.js";
 import { ingredientsRouter } from "./ingredients.js";
 import { labRouter } from "./lab.js";
 import { plansRouter } from "./plans.js";
+import { usersRouter } from "./users.js";
 
 export const router = Router();
 
@@ -45,6 +47,8 @@ router.get("/health", async (_req, res) => {
 router.use(authRouter);
 router.use(plansRouter);
 router.use(labRouter);
+router.use(usersRouter);
+router.use(auditRouter);
 router.use(formulasRouter);
 router.use(ingredientsRouter);
 
