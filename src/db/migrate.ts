@@ -71,7 +71,7 @@ async function hasLegacyAppSchema(): Promise<boolean> {
  */
 async function bootstrapExisting(files: string[]): Promise<void> {
   console.log(
-    "[migrate] bootstrap: BD poblada sin schema_migrations — registrando SQL actuales sin re-ejecutar",
+    "[migrate] bootstrap: BD poblada sin schema_migrations — registrando solo 001_*.sql; el resto se ejecutará",
   );
   await client.query("BEGIN");
   try {
@@ -121,7 +121,8 @@ async function main(): Promise<void> {
   let applied = await getAppliedIds();
 
   if (applied.size === 0 && (await hasLegacyAppSchema())) {
-    await bootstrapExisting(files);
+    const bootstrapIds = files.filter((id) => id.startsWith("001_"));
+    await bootstrapExisting(bootstrapIds.length ? bootstrapIds : [files[0]]);
     applied = await getAppliedIds();
   }
 

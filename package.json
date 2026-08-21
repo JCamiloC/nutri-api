@@ -17,7 +17,9 @@
     "db:setup": "docker compose up -d && tsx src/db/wait-and-migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
     "db:seed-users": "tsx src/db/seed-users.ts",
+    "db:seed-icbf": "tsx src/db/seed-icbf.ts",
     "db:import-sample": "tsx src/db/import-enerxis-sample.ts",
+    "db:import-icbf": "tsx src/db/import-icbf.ts",
 
     "test:engine": "tsx src/nutrition-engine/smoke.ts"
   },
