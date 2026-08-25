@@ -16,6 +16,7 @@ import { formulasRouter } from "./formulas.js";
 import { ingredientsRouter } from "./ingredients.js";
 import { labRouter } from "./lab.js";
 import { plansRouter } from "./plans.js";
+import { supportRouter } from "./support.js";
 import { usersRouter } from "./users.js";
 
 export const router = Router();
@@ -53,6 +54,7 @@ router.use(auditRouter);
 router.use(formulasRouter);
 router.use(ingredientsRouter);
 router.use(catalogRouter);
+router.use(supportRouter);
 
 const nutrientProfile = z
   .object({

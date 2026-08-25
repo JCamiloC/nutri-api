@@ -90,6 +90,23 @@ psql "$DATABASE_URL" -c "\d formula_versions"
 
 Front (nutri-saas): deploy FTP/Actions **no** migra BD; solo apunta a `NEXT_PUBLIC_API_URL`.
 
+## Mesa de ayuda (tickets por correo)
+
+`POST /v1/support/tickets`:
+
+- **Sin SMTP** (estado actual en prod): modo **mock** — responde `ok`, guarda en auditoría (`support.ticket` con prefijo `[mock]`) y loguea en el servidor. No falla.
+- **Con SMTP**: envía correo real a `SUPPORT_EMAIL`.
+
+```bash
+SUPPORT_EMAIL=soporte@enerxis.com
+SMTP_HOST=smtp.ejemplo.com
+SMTP_PORT=587
+SMTP_USER=...
+SMTP_PASS=...
+SMTP_FROM="NutriLab <noreply@enerxis.com>"
+# SMTP_SECURE=true   # solo si el puerto es 465
+```
+
 ## Deploy manual (sin webhook)
 
 ```bash
