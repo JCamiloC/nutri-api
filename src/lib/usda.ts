@@ -1,8 +1,11 @@
+import dns from "node:dns/promises";
+import https from "node:https";
 import { env } from "../config/env.js";
 import { num, type CatalogHit, type NutrientSnapshot } from "./catalog-profile.js";
 
-const USDA_BASE = "https://api.nal.usda.gov/fdc/v1";
+const USDA_HOST = "api.nal.usda.gov";
 const SEARCH_TTL_MS = 2 * 60 * 1000;
+const REQUEST_TIMEOUT_MS = 15000;
 
 const searchCache = new Map<string, { at: number; items: CatalogHit[] }>();
 
@@ -74,18 +77,96 @@ function macrosFromNutrients(nutrients: NutrientPick[]) {
   };
 }
 
+function friendlyUsdaError(status: number, body: string): string {
+  if (status === 429 || /OVER_RATE_LIMIT/i.test(body)) {
+    return "USDA alcanzó el límite de solicitudes. Espera un momento o usa una API key propia.";
+  }
+  if (body.trimStart().startsWith("<!") || /<html/i.test(body)) {
+    return "USDA respondió una página HTML en lugar de JSON (posible bloqueo de IP/red).";
+  }
+  const compact = body.replace(/\s+/g, " ").trim().slice(0, 180);
+  return compact || `USDA HTTP ${status}`;
+}
+
+async function resolveUsdaIpv4(): Promise<string[]> {
+  try {
+    const result = await dns.lookup(USDA_HOST, { all: true, family: 4 });
+    const ips = [...new Set(result.map((row) => row.address))];
+    return ips.length ? ips : ["56.137.210.144"];
+  } catch {
+    return ["56.137.210.144", "40.39.88.46"];
+  }
+}
+
+function httpsGetJson(ip: string, pathWithQuery: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        host: ip,
+        servername: USDA_HOST,
+        path: pathWithQuery,
+        method: "GET",
+        headers: {
+          Host: USDA_HOST,
+          Accept: "application/json",
+          "User-Agent": "nutri-api/0.1",
+        },
+        timeout: REQUEST_TIMEOUT_MS,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () =>
+          resolve({
+            status: res.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+      },
+    );
+    req.on("timeout", () => {
+      req.destroy(new Error("USDA timeout"));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
 async function usdaFetch(path: string): Promise<unknown> {
   const key = requireUsdaKey();
-  const url = `${USDA_BASE}${path}${path.includes("?") ? "&" : "?"}api_key=${encodeURIComponent(key)}`;
-  const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw Object.assign(
-      new Error(body.slice(0, 240) || `USDA ${response.status}`),
-      { status: response.status === 429 ? 429 : 502, code: "usda_upstream" },
-    );
+  const pathWithQuery = `/fdc/v1${path}${path.includes("?") ? "&" : "?"}api_key=${encodeURIComponent(key)}`;
+  const ips = await resolveUsdaIpv4();
+  let lastError: Error | null = null;
+
+  for (const ip of ips) {
+    try {
+      const { status, body } = await httpsGetJson(ip, pathWithQuery);
+      if (status >= 200 && status < 300) {
+        try {
+          return JSON.parse(body) as unknown;
+        } catch {
+          lastError = Object.assign(new Error(friendlyUsdaError(status, body)), {
+            status: 502,
+            code: "usda_upstream",
+          });
+          continue;
+        }
+      }
+      lastError = Object.assign(new Error(friendlyUsdaError(status, body)), {
+        status: status === 429 ? 429 : 502,
+        code: "usda_upstream",
+      });
+      // Prueba otra IP si rate-limit / HTML / 4xx-5xx transitorio
+      continue;
+    } catch (error) {
+      lastError = Object.assign(
+        new Error(error instanceof Error ? error.message : String(error)),
+        { status: 502, code: "usda_upstream" },
+      );
+    }
   }
-  return response.json();
+
+  throw lastError ?? Object.assign(new Error("USDA no disponible"), { status: 502, code: "usda_upstream" });
 }
 
 export function usdaSearchHit(food: Record<string, unknown>): CatalogHit | null {

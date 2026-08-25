@@ -46,7 +46,7 @@ export type LabCapacity = {
   tablesIncluded: number;
   tablesExtra: number;
   total: number;
-  /** Fórmulas ya impresas/exportadas (cobran 1 cupo). */
+  /** Versiones billable emitidas (1 cupo c/u). */
   used: number;
   /** Borradores / listas sin imprimir (no gastan cupo). */
   drafts: number;
@@ -84,10 +84,14 @@ export async function getLabCapacity(labId: string): Promise<LabCapacity | null>
 
   const countRes = await pool.query(
     `SELECT
-       count(*) FILTER (WHERE status = 'exportada')::int AS used,
-       count(*) FILTER (WHERE status IS DISTINCT FROM 'exportada')::int AS drafts
-     FROM formulas
-     WHERE lab_id = $1`,
+       (
+         SELECT count(*)::int FROM formula_versions
+         WHERE lab_id = $1 AND billable = true
+       ) AS used,
+       (
+         SELECT count(*)::int FROM formulas
+         WHERE lab_id = $1 AND status IS DISTINCT FROM 'exportada'
+       ) AS drafts`,
     [labId],
   );
   const used = Number(countRes.rows[0]?.used ?? 0);

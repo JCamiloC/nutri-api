@@ -18,9 +18,10 @@
     "db:seed": "tsx src/db/seed.ts",
     "db:seed-users": "tsx src/db/seed-users.ts",
     "db:seed-icbf": "tsx src/db/seed-icbf.ts",
+    "db:seed-base": "tsx src/db/seed-base.ts",
     "db:import-sample": "tsx src/db/import-enerxis-sample.ts",
     "db:import-icbf": "tsx src/db/import-icbf.ts",
-
+    "db:import-icbf-excel": "tsx src/db/import-icbf-excel.ts",
     "test:engine": "tsx src/nutrition-engine/smoke.ts"
   },
   "engines": {
@@ -44,6 +45,7 @@
     "@types/pg": "^8.11.11",
     "mysql2": "^3.23.2",
     "tsx": "^4.19.3",
-    "typescript": "^5.8.2"
+    "typescript": "^5.8.2",
+    "xlsx": "^0.18.5"
   }
 }

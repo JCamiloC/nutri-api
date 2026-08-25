@@ -1,5 +1,9 @@
 import type { Request } from "express";
 import { DEMO_LAB_ID } from "../config/constants.js";
+import {
+  isIngredientEditable,
+  ownershipKind,
+} from "./ingredient-ownership.js";
 
 /**
  * Lab efectivo:
@@ -68,7 +72,12 @@ export function mapFormulaLine(row: Record<string, unknown>) {
   };
 }
 
-export function mapIngredient(row: Record<string, unknown>) {
+export function mapIngredient(
+  row: Record<string, unknown>,
+  viewer?: { id: string; role?: string; labId?: string | null } | null,
+) {
+  const editable = isIngredientEditable(row, viewer ?? null);
+  const kind = ownershipKind(row, viewer ?? null);
   return {
     id: row.id,
     labId: row.lab_id,
@@ -82,7 +91,13 @@ export function mapIngredient(row: Record<string, unknown>) {
     estado: row.estado,
     proveedor: row.proveedor,
     tipo: row.tipo,
-    readOnly: row.read_only,
+    readOnly: row.read_only === true || row.is_base === true || !editable,
+    isBase: row.is_base === true,
+    createdByUserId: row.created_by_user_id ?? null,
+    copiedFromId: row.copied_from_id ?? null,
+    ownedByMe: kind === "mine",
+    editable,
+    ownership: kind,
     grasas: Number(row.grasas),
     grasaSaturada: Number(row.grasa_saturada),
     grasaMono: Number(row.grasa_mono),

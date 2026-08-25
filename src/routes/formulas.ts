@@ -3,6 +3,14 @@ import { z } from "zod";
 import { getPool } from "../db/pool.js";
 import { writeAudit } from "../lib/audit.js";
 import { validateFormulaDraft } from "../lib/formula-validation.js";
+import {
+  getLatestVersion,
+  hashFormulaContent,
+  insertFormulaVersion,
+  mapFormulaVersion,
+  type VersionSnapshot,
+} from "../lib/formula-versions.js";
+import { canResolveIngredientForFormula } from "../lib/ingredient-ownership.js";
 import { ingredientToPer100g } from "../lib/ingredient-profile.js";
 import { mapFormula, mapFormulaLine, resolveLabId } from "../lib/mappers.js";
 import { getLabCapacity } from "../lib/quota.js";
@@ -503,11 +511,10 @@ formulasRouter.post("/v1/formulas/:id/recalculate", requireAuth, requireWrite, a
     for (const line of linesRes.rows) {
       let per100g = ingredientToPer100g({});
       if (line.ingredient_id) {
-        const ing = await pool.query(
-          `SELECT * FROM ingredients WHERE id = $1 AND lab_id = $2`,
-          [line.ingredient_id, labId],
-        );
-        if (ing.rows[0]) {
+        const ing = await pool.query(`SELECT * FROM ingredients WHERE id = $1`, [
+          line.ingredient_id,
+        ]);
+        if (ing.rows[0] && canResolveIngredientForFormula(ing.rows[0], labId)) {
           per100g = ingredientToPer100g(ing.rows[0]);
         }
       }
@@ -551,25 +558,30 @@ formulasRouter.post("/v1/formulas/:id/recalculate", requireAuth, requireWrite, a
 });
 
 /**
- * Emite el rotulado: 1.ª impresión gasta 1 cupo (status → exportada).
- * Reimpresión de una ya exportada no vuelve a cobrar.
+ * Emite el rotulado con versionado comercial:
+ * - Contenido nuevo vs última versión → crea versión billable (1 cupo) + congela snapshot.
+ * - Mismo contenido → reimpresión desde snapshot (sin cupo).
  */
 formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (req, res) => {
+  const pool = getPool();
+  const client = await pool.connect();
   try {
     const labId = getLabId(req, res);
     if (!labId) return;
-    const pool = getPool();
-    const formulaRes = await pool.query(
-      `SELECT * FROM formulas WHERE id = $1 AND lab_id = $2`,
+
+    await client.query("BEGIN");
+
+    const formulaRes = await client.query(
+      `SELECT * FROM formulas WHERE id = $1 AND lab_id = $2 FOR UPDATE`,
       [req.params.id, labId],
     );
     if (!formulaRes.rows[0]) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "not_found" });
     }
     const formula = formulaRes.rows[0];
-    const alreadyBilled = String(formula.status) === "exportada";
 
-    const linesRes = await pool.query(
+    const linesRes = await client.query(
       `SELECT * FROM formula_lines WHERE formula_id = $1 ORDER BY sort_order ASC`,
       [req.params.id],
     );
@@ -585,18 +597,8 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
       requireCompletePercent: true,
     });
     if (issues.length) {
+      await client.query("ROLLBACK");
       return res.status(400).json({ error: "validation_failed", issues });
-    }
-
-    if (!alreadyBilled) {
-      const capacity = await getLabCapacity(labId);
-      if (!capacity || capacity.remaining <= 0) {
-        return res.status(403).json({
-          error: "quota_exceeded",
-          message: `Cupo de impresión agotado (${capacity?.used ?? 0}/${capacity?.total ?? 0} emitidas). Solicita un pack extra o un plan superior. Las cotizaciones sin imprimir no gastan cupo.`,
-          capacity,
-        });
-      }
     }
 
     const engineLines: Array<{
@@ -605,21 +607,28 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
       percent: number;
       per100g: ReturnType<typeof ingredientToPer100g>;
     }> = [];
+    const snapshotLines: Array<Record<string, unknown>> = [];
 
     for (const line of linesRes.rows) {
       let per100g = ingredientToPer100g({});
       if (line.ingredient_id) {
-        const ing = await pool.query(
-          `SELECT * FROM ingredients WHERE id = $1 AND lab_id = $2`,
-          [line.ingredient_id, labId],
-        );
-        if (ing.rows[0]) {
+        const ing = await client.query(`SELECT * FROM ingredients WHERE id = $1`, [
+          line.ingredient_id,
+        ]);
+        if (ing.rows[0] && canResolveIngredientForFormula(ing.rows[0], labId)) {
           per100g = ingredientToPer100g(ing.rows[0]);
         }
       }
       engineLines.push({
         source: line.source as IngredientSource,
         name: String(line.name),
+        percent: Number(line.percent) || 0,
+        per100g,
+      });
+      snapshotLines.push({
+        ingredientId: line.ingredient_id,
+        source: line.source,
+        name: line.name,
         percent: Number(line.percent) || 0,
         per100g,
       });
@@ -632,23 +641,174 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
       lines: engineLines,
     });
 
+    const formulaPayload = {
+      title: formula.title,
+      productName: formula.product_name,
+      brand: formula.brand,
+      formulaType: formula.formula_type,
+      packageWeight: Number(formula.package_weight),
+      servings: Number(formula.servings),
+      servingSize: Number(formula.serving_size),
+      reconstitutedServing: Number(formula.reconstituted_serving) || 0,
+      waterPerServing: Number(formula.water_per_serving) || 0,
+      showLogo: formula.show_logo !== false,
+      showWatermark: formula.show_watermark !== false,
+      manufacturedBy: formula.manufactured_by,
+      manufacturedFor: formula.manufactured_for,
+    };
+
+    const contentHash = hashFormulaContent({
+      formula: formulaPayload,
+      lines: snapshotLines,
+      result: {
+        calories: {
+          per100: result.caloriesPer100,
+          perServing: result.caloriesPerServing,
+        },
+        nutrients: result.nutrients,
+        ingredientList: result.ingredientList,
+      },
+    });
+
+    const latest = await getLatestVersion(client, String(formula.id));
+    const isReprint =
+      latest != null && String(latest.content_hash) === contentHash;
+
+    let versionRow = latest;
+    let firstBillablePrint = false;
     let updated = formula;
-    if (!alreadyBilled) {
-      const up = await pool.query(
-        `UPDATE formulas SET status = 'exportada', updated_at = now()
-         WHERE id = $1 AND lab_id = $2
-         RETURNING *`,
-        [req.params.id, labId],
-      );
-      updated = up.rows[0] ?? formula;
+
+    if (isReprint && latest) {
+      // Reimpresión: entrega snapshot congelado (lo vendido), sin cupo.
+      await client.query("COMMIT");
+      const snap = (latest.snapshot ?? {}) as VersionSnapshot;
+      const frozenResult = (snap.result ?? {}) as Record<string, unknown>;
+      const capacity = await getLabCapacity(labId);
+      await writeAudit(req, {
+        labId,
+        action: "formula.reprint",
+        detail: `${String(formula.title)} · v${latest.version_label} (sin cupo)`,
+      });
+      return res.json({
+        formulaId: formula.id,
+        title: snap.formula?.title ?? formula.title,
+        productName: snap.formula?.productName ?? formula.product_name,
+        brand: snap.formula?.brand ?? formula.brand,
+        formulaType: snap.formula?.formulaType ?? formula.formula_type,
+        packageWeight: Number(snap.formula?.packageWeight ?? formula.package_weight),
+        servings: Number(snap.formula?.servings ?? formula.servings),
+        servingSize: Number(snap.formula?.servingSize ?? formula.serving_size),
+        status: formula.status,
+        billed: false,
+        firstBillablePrint: false,
+        isReprint: true,
+        version: mapFormulaVersion(latest),
+        capacity,
+        formula: {
+          ...mapFormula(formula),
+          lines: linesRes.rows.map(mapFormulaLine),
+          labBranding: await loadLabBranding(labId, req),
+        },
+        percentTotal: frozenResult.percentTotal ?? result.percentTotal,
+        percentComplete: frozenResult.percentComplete ?? result.percentComplete,
+        caloriesPer100: frozenResult.caloriesPer100 ?? result.caloriesPer100,
+        caloriesPerServing: frozenResult.caloriesPerServing ?? result.caloriesPerServing,
+        legend: frozenResult.legend ?? result.legend,
+        ingredientList: frozenResult.ingredientList ?? result.ingredientList,
+        nutrients: frozenResult.nutrients ?? result.nutrients,
+      });
     }
 
-    const capacity = await getLabCapacity(labId);
+    const capacityBefore = await getLabCapacity(labId);
+    if (!capacityBefore || capacityBefore.remaining <= 0) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({
+        error: "quota_exceeded",
+        message: `Cupo de emisiones agotado (${capacityBefore?.used ?? 0}/${capacityBefore?.total ?? 0} versiones). Solicita un pack extra o un plan superior. Cotizar/recalcular no gasta cupo; solo una versión nueva.`,
+        capacity: capacityBefore,
+      });
+    }
 
+    const snapshot: VersionSnapshot = {
+      formula: formulaPayload,
+      lines: snapshotLines,
+      result: {
+        percentTotal: result.percentTotal,
+        percentComplete: result.percentComplete,
+        caloriesPer100: result.caloriesPer100,
+        caloriesPerServing: result.caloriesPerServing,
+        legend: result.legend,
+        ingredientList: result.ingredientList,
+        nutrients: result.nutrients,
+      },
+      printedAt: new Date().toISOString(),
+      printedBy: req.user?.email ?? req.user?.name ?? null,
+    };
+
+    try {
+      versionRow = await insertFormulaVersion(client, {
+        formulaId: String(formula.id),
+        labId,
+        contentHash,
+        snapshot,
+        createdByUserId: req.user?.id ?? null,
+        billable: true,
+      });
+    } catch (insertErr) {
+      const pgErr = insertErr as { code?: string };
+      // Carrera: otra emisión ya creó la misma versión
+      if (pgErr.code === "23505") {
+        const existing = await client.query(
+          `SELECT * FROM formula_versions WHERE formula_id = $1 AND content_hash = $2`,
+          [formula.id, contentHash],
+        );
+        if (existing.rows[0]) {
+          versionRow = existing.rows[0];
+          await client.query("COMMIT");
+          const capacity = await getLabCapacity(labId);
+          return res.json({
+            formulaId: formula.id,
+            title: formula.title,
+            productName: formula.product_name,
+            brand: formula.brand,
+            formulaType: formula.formula_type,
+            packageWeight: Number(formula.package_weight),
+            servings: Number(formula.servings),
+            servingSize: Number(formula.serving_size),
+            status: formula.status,
+            billed: false,
+            firstBillablePrint: false,
+            isReprint: true,
+            version: mapFormulaVersion(versionRow),
+            capacity,
+            formula: {
+              ...mapFormula(formula),
+              lines: linesRes.rows.map(mapFormulaLine),
+              labBranding: await loadLabBranding(labId, req),
+            },
+            ...result,
+          });
+        }
+      }
+      throw insertErr;
+    }
+
+    firstBillablePrint = true;
+    const up = await client.query(
+      `UPDATE formulas SET status = 'exportada', updated_at = now()
+       WHERE id = $1 AND lab_id = $2
+       RETURNING *`,
+      [req.params.id, labId],
+    );
+    updated = up.rows[0] ?? formula;
+
+    await client.query("COMMIT");
+
+    const capacity = await getLabCapacity(labId);
     await writeAudit(req, {
       labId,
-      action: alreadyBilled ? "formula.reprint" : "formula.print",
-      detail: `${String(updated.title)}${alreadyBilled ? " (reimpresión)" : " (1 cupo)"}`,
+      action: "formula.print",
+      detail: `${String(updated.title)} · v${versionRow.version_label} (1 cupo)`,
     });
 
     return res.json({
@@ -662,7 +822,9 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
       servingSize: Number(updated.serving_size),
       status: updated.status,
       billed: true,
-      firstBillablePrint: !alreadyBilled,
+      firstBillablePrint,
+      isReprint: false,
+      version: mapFormulaVersion(versionRow),
       capacity,
       formula: {
         ...mapFormula(updated),
@@ -672,7 +834,79 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
       ...result,
     });
   } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      /* ignore */
+    }
     const message = error instanceof Error ? error.message : String(error);
     return res.status(500).json({ error: "print_formula_failed", message });
+  } finally {
+    client.release();
   }
 });
+
+/** Historial de versiones emitidas (inmutables). */
+formulasRouter.get("/v1/formulas/:id/versions", requireAuth, async (req, res) => {
+  try {
+    const labId = getLabId(req, res);
+    if (!labId) return;
+    const pool = getPool();
+    const formula = await pool.query(
+      `SELECT id FROM formulas WHERE id = $1 AND lab_id = $2`,
+      [req.params.id, labId],
+    );
+    if (!formula.rows[0]) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    const versions = await pool.query(
+      `SELECT id, formula_id, lab_id, version_label, version_seq, billable,
+              content_hash, created_by_user_id, created_at
+       FROM formula_versions
+       WHERE formula_id = $1
+       ORDER BY version_seq DESC`,
+      [req.params.id],
+    );
+    return res.json({
+      items: versions.rows.map((row) => ({
+        ...mapFormulaVersion(row),
+        snapshot: undefined,
+      })),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ error: "list_versions_failed", message });
+  }
+});
+
+/** Detalle de una versión (snapshot congelado). */
+formulasRouter.get(
+  "/v1/formulas/:id/versions/:versionId",
+  requireAuth,
+  async (req, res) => {
+    try {
+      const labId = getLabId(req, res);
+      if (!labId) return;
+      const pool = getPool();
+      const formula = await pool.query(
+        `SELECT id FROM formulas WHERE id = $1 AND lab_id = $2`,
+        [req.params.id, labId],
+      );
+      if (!formula.rows[0]) {
+        return res.status(404).json({ error: "not_found" });
+      }
+      const version = await pool.query(
+        `SELECT * FROM formula_versions
+         WHERE id = $1 AND formula_id = $2 AND lab_id = $3`,
+        [req.params.versionId, req.params.id, labId],
+      );
+      if (!version.rows[0]) {
+        return res.status(404).json({ error: "version_not_found" });
+      }
+      return res.json(mapFormulaVersion(version.rows[0]));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return res.status(500).json({ error: "get_version_failed", message });
+    }
+  },
+);

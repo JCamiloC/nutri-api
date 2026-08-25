@@ -72,6 +72,24 @@ Ver tracking:
 psql "$DATABASE_URL" -c 'SELECT * FROM schema_migrations ORDER BY applied_at'
 ```
 
+## Migraciones pendientes / checklist prod
+
+Al hacer push a `main` del repo API, el webhook debe aplicar automáticamente:
+
+- `005_ingredient_ownership.sql` — ownership global de ingredientes
+- `006_formula_versions.sql` — versionado comercial + backfill de exportadas
+
+Verificar post-deploy:
+
+```bash
+psql "$DATABASE_URL" -c "SELECT id, applied_at FROM schema_migrations ORDER BY id"
+psql "$DATABASE_URL" -c "\d formula_versions"
+```
+
+**No** correr `db:seed` / `db:seed-base` en producción salvo decisión comercial explícita (base Enerxis).
+
+Front (nutri-saas): deploy FTP/Actions **no** migra BD; solo apunta a `NEXT_PUBLIC_API_URL`.
+
 ## Deploy manual (sin webhook)
 
 ```bash
