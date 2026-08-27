@@ -21,6 +21,7 @@ import {
   type FormulaType,
   type IngredientSource,
 } from "../nutrition-engine/index.js";
+import { applySealOverrides } from "../nutrition-engine/warning-seals.js";
 
 export const formulasRouter = Router();
 
@@ -119,6 +120,17 @@ formulasRouter.get("/v1/formulas/:id", requireAuth, async (req, res) => {
   }
 });
 
+const sealOverridesSchema = z
+  .object({
+    azucar: z.boolean().optional(),
+    sodio: z.boolean().optional(),
+    sat: z.boolean().optional(),
+    trans: z.boolean().optional(),
+    edulcorante: z.boolean().optional(),
+  })
+  .optional()
+  .nullable();
+
 const createBody = z.object({
   title: z.string().min(1),
   productName: z.string().optional(),
@@ -133,8 +145,14 @@ const createBody = z.object({
   formulaType: z.enum(["Solido", "Liquido", "Reconstituida"]).optional(),
   showLogo: z.boolean().optional(),
   showWatermark: z.boolean().optional(),
+  containsSweetener: z.boolean().optional(),
+  rsa: z.string().optional().nullable(),
+  flavor: z.string().optional().nullable(),
+  usageMode: z.string().optional().nullable(),
+  storageMode: z.string().optional().nullable(),
   manufacturedBy: z.string().optional().nullable(),
   manufacturedFor: z.string().optional().nullable(),
+  sealOverrides: sealOverridesSchema,
   lines: z
     .array(
       z.object({
@@ -203,8 +221,9 @@ formulasRouter.post("/v1/formulas", requireAuth, requireWrite, async (req, res) 
         lab_id, title, product_name, brand, status,
         package_weight, weight_unit, servings, serving_size,
         reconstituted_serving, water_per_serving, formula_type, ingredient_count,
-        show_logo, show_watermark, manufactured_by, manufactured_for
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+        show_logo, show_watermark, sweetener, rsa, flavor, usage_mode, storage_mode,
+        manufactured_by, manufactured_for, meta
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb)
       RETURNING *`,
       [
         labId,
@@ -222,8 +241,18 @@ formulasRouter.post("/v1/formulas", requireAuth, requireWrite, async (req, res) 
         lines.length,
         data.showLogo ?? true,
         data.showWatermark ?? (lab.watermark_default !== false),
+        data.containsSweetener ? "1" : null,
+        data.rsa?.trim() || null,
+        data.flavor?.trim() || null,
+        data.usageMode?.trim() || null,
+        data.storageMode?.trim() || null,
         data.manufacturedBy ?? lab.manufactured_by_default ?? null,
         data.manufacturedFor ?? lab.manufactured_for_default ?? null,
+        JSON.stringify(
+          data.sealOverrides
+            ? { sealOverrides: data.sealOverrides }
+            : {},
+        ),
       ],
     );
 
@@ -351,6 +380,18 @@ formulasRouter.patch("/v1/formulas/:id", requireAuth, requireWrite, async (req, 
         });
       }
     }
+    const existingMeta =
+      existing.rows[0].meta && typeof existing.rows[0].meta === "object"
+        ? (existing.rows[0].meta as Record<string, unknown>)
+        : {};
+    const nextMeta =
+      d.sealOverrides !== undefined
+        ? {
+            ...existingMeta,
+            sealOverrides: d.sealOverrides,
+          }
+        : existingMeta;
+
     const updated = await client.query(
       `UPDATE formulas SET
         title = COALESCE($3, title),
@@ -368,6 +409,12 @@ formulasRouter.patch("/v1/formulas/:id", requireAuth, requireWrite, async (req, 
         show_watermark = COALESCE($15, show_watermark),
         manufactured_by = COALESCE($16, manufactured_by),
         manufactured_for = COALESCE($17, manufactured_for),
+        sweetener = COALESCE($18, sweetener),
+        rsa = COALESCE($19, rsa),
+        flavor = COALESCE($20, flavor),
+        usage_mode = COALESCE($21, usage_mode),
+        storage_mode = COALESCE($22, storage_mode),
+        meta = COALESCE($23::jsonb, meta),
         updated_at = now()
       WHERE id = $1 AND lab_id = $2
       RETURNING *`,
@@ -389,6 +436,16 @@ formulasRouter.patch("/v1/formulas/:id", requireAuth, requireWrite, async (req, 
         d.showWatermark ?? null,
         d.manufacturedBy === undefined ? null : d.manufacturedBy,
         d.manufacturedFor === undefined ? null : d.manufacturedFor,
+        d.containsSweetener === undefined
+          ? null
+          : d.containsSweetener
+            ? "1"
+            : "",
+        d.rsa === undefined ? null : d.rsa?.trim() || "",
+        d.flavor === undefined ? null : d.flavor?.trim() || "",
+        d.usageMode === undefined ? null : d.usageMode?.trim() || "",
+        d.storageMode === undefined ? null : d.storageMode?.trim() || "",
+        d.sealOverrides !== undefined ? JSON.stringify(nextMeta) : null,
       ],
     );
 
@@ -534,6 +591,16 @@ formulasRouter.post("/v1/formulas/:id/recalculate", requireAuth, requireWrite, a
       lines: engineLines,
     });
 
+    const mapped = mapFormula(formula);
+    const seals = applySealOverrides(
+      {
+        ...result.sealsSuggested,
+        edulcorante:
+          result.sealsSuggested.edulcorante || Boolean(mapped.containsSweetener),
+      },
+      mapped.sealOverrides,
+    );
+
     await writeAudit(req, {
       labId,
       action: "formula.recalculate",
@@ -549,6 +616,12 @@ formulasRouter.post("/v1/formulas/:id/recalculate", requireAuth, requireWrite, a
       packageWeight: Number(formula.package_weight),
       servings: Number(formula.servings),
       servingSize: Number(formula.serving_size),
+      rsa: mapped.rsa,
+      flavor: mapped.flavor,
+      usageMode: mapped.usageMode,
+      storageMode: mapped.storageMode,
+      containsSweetener: mapped.containsSweetener,
+      seals,
       ...result,
     });
   } catch (error) {
@@ -641,6 +714,17 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
       lines: engineLines,
     });
 
+    const mappedFormula = mapFormula(formula);
+    const seals = applySealOverrides(
+      {
+        ...result.sealsSuggested,
+        edulcorante:
+          result.sealsSuggested.edulcorante ||
+          Boolean(mappedFormula.containsSweetener),
+      },
+      mappedFormula.sealOverrides,
+    );
+
     const formulaPayload = {
       title: formula.title,
       productName: formula.product_name,
@@ -655,6 +739,12 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
       showWatermark: formula.show_watermark !== false,
       manufacturedBy: formula.manufactured_by,
       manufacturedFor: formula.manufactured_for,
+      rsa: mappedFormula.rsa,
+      flavor: mappedFormula.flavor,
+      usageMode: mappedFormula.usageMode,
+      storageMode: mappedFormula.storageMode,
+      containsSweetener: mappedFormula.containsSweetener,
+      seals,
     };
 
     const contentHash = hashFormulaContent({
@@ -667,6 +757,8 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
         },
         nutrients: result.nutrients,
         ingredientList: result.ingredientList,
+        seals,
+        allergens: result.allergens,
       },
     });
 
@@ -716,6 +808,8 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
         legend: frozenResult.legend ?? result.legend,
         ingredientList: frozenResult.ingredientList ?? result.ingredientList,
         nutrients: frozenResult.nutrients ?? result.nutrients,
+        seals: frozenResult.seals ?? seals,
+        allergens: frozenResult.allergens ?? result.allergens,
       });
     }
 
@@ -740,6 +834,9 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
         legend: result.legend,
         ingredientList: result.ingredientList,
         nutrients: result.nutrients,
+        allergens: result.allergens,
+        seals,
+        sealMetrics: result.sealMetrics,
       },
       printedAt: new Date().toISOString(),
       printedBy: req.user?.email ?? req.user?.name ?? null,
@@ -831,6 +928,7 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
         lines: linesRes.rows.map(mapFormulaLine),
         labBranding: await loadLabBranding(labId, req),
       },
+      seals,
       ...result,
     });
   } catch (error) {

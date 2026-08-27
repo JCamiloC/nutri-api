@@ -30,6 +30,22 @@ export function resolveLabId(req: Request): string {
 }
 
 export function mapFormula(row: Record<string, unknown>) {
+  const meta =
+    row.meta && typeof row.meta === "object" && !Array.isArray(row.meta)
+      ? (row.meta as Record<string, unknown>)
+      : {};
+  const sealOverrides =
+    meta.sealOverrides && typeof meta.sealOverrides === "object"
+      ? (meta.sealOverrides as Record<string, unknown>)
+      : null;
+  const sweetRaw = row.sweetener;
+  const containsSweetener =
+    sweetRaw === true ||
+    sweetRaw === 1 ||
+    String(sweetRaw ?? "").toLowerCase() === "1" ||
+    String(sweetRaw ?? "").toLowerCase() === "true" ||
+    String(sweetRaw ?? "").toLowerCase() === "si";
+
   return {
     id: row.id,
     labId: row.lab_id,
@@ -47,13 +63,23 @@ export function mapFormula(row: Record<string, unknown>) {
     ingredientCount: Number(row.ingredient_count),
     showLogo: row.show_logo,
     showWatermark: row.show_watermark !== false,
-    sweetener: row.sweetener,
-    rsa: row.rsa,
-    flavor: row.flavor,
-    usageMode: row.usage_mode,
+    containsSweetener,
+    rsa: (row.rsa as string | null) ?? null,
+    flavor: (row.flavor as string | null) ?? null,
+    usageMode: (row.usage_mode as string | null) ?? null,
+    storageMode: (row.storage_mode as string | null) ?? null,
     manufacturedBy: row.manufactured_by,
     manufacturedFor: row.manufactured_for,
-    meta: row.meta,
+    sealOverrides: sealOverrides
+      ? {
+          azucar: sealOverrides.azucar === true,
+          sodio: sealOverrides.sodio === true,
+          sat: sealOverrides.sat === true,
+          trans: sealOverrides.trans === true,
+          edulcorante: sealOverrides.edulcorante === true,
+        }
+      : null,
+    meta,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

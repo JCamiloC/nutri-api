@@ -1,3 +1,10 @@
+import {
+  computeWarningSeals,
+  nutrientPer100,
+  type SealMetrics,
+  type WarningSeals,
+} from "./warning-seals.js";
+
 /**
  * Motor nutricional — portado desde Enerxis/cotizador/js/imprimirReceta.js
  *
@@ -189,6 +196,8 @@ export interface RecalculateResult {
   legendItems: string[];
   allergens: Record<string, unknown>;
   ingredientList: string;
+  sealsSuggested: WarningSeals;
+  sealMetrics: SealMetrics;
 }
 
 const MACRO_FIELD_MAP: Record<string, string> = {
@@ -426,6 +435,14 @@ export function recalculateFormula(input: RecalculateInput): RecalculateResult {
     .map((i) => i.name)
     .join(", ");
 
+  const { seals: sealsSuggested, metrics: sealMetrics } = computeWarningSeals({
+    caloriesPer100,
+    azucarAddPer100: nutrientPer100(nutrients, "azucarAdd"),
+    sodioPer100: nutrientPer100(nutrients, "sodio"),
+    grasaSaturadaPer100: nutrientPer100(nutrients, "grasaSaturada"),
+    grasaTransPer100: nutrientPer100(nutrients, "grasaTrans"),
+  });
+
   return {
     percentTotal,
     percentComplete: Math.abs(percentTotal - 100) < 0.01,
@@ -436,5 +453,7 @@ export function recalculateFormula(input: RecalculateInput): RecalculateResult {
     legendItems,
     allergens,
     ingredientList,
+    sealsSuggested,
+    sealMetrics,
   };
 }
