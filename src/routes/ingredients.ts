@@ -293,14 +293,14 @@ ingredientsRouter.patch("/v1/ingredients/:id", requireAuth, requireWrite, async 
       return res.status(404).json({ error: "not_found" });
     }
 
-    if (row.is_base === true) {
-      return res.status(403).json({
-        error: "ingredient_base_readonly",
-        message: "La base Enerxis es solo lectura. Duplica el ingrediente para editarlo.",
-      });
-    }
-
     if (!isIngredientEditable(row, viewer)) {
+      if (row.is_base === true) {
+        return res.status(403).json({
+          error: "ingredient_base_readonly",
+          message:
+            "La base Enerxis solo la edita el equipo Enerxis. Duplica el ingrediente para personalizarlo.",
+        });
+      }
       return res.status(403).json({
         error: "ingredient_not_owner",
         message:

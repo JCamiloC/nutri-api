@@ -1,7 +1,7 @@
 import { Router } from "express";
-import nodemailer from "nodemailer";
 import { z } from "zod";
 import { writeAudit } from "../lib/audit.js";
+import { sendMail, smtpConfigured } from "../lib/mailer.js";
 import { resolveLabId } from "../lib/mappers.js";
 import { requireAuth } from "../middleware/auth.js";
 
@@ -11,10 +11,6 @@ const ticketBody = z.object({
   subject: z.string().trim().min(3).max(200),
   message: z.string().trim().min(10).max(5000),
 });
-
-function smtpConfigured(): boolean {
-  return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
-}
 
 supportRouter.post("/v1/support/tickets", requireAuth, async (req, res) => {
   try {
@@ -51,46 +47,7 @@ supportRouter.post("/v1/support/tickets", requireAuth, async (req, res) => {
       message,
     ].join("\n");
 
-    // Sin SMTP: modo mock (acepta el ticket, audita y loguea; listo para prod sin correo real).
-    if (!smtpConfigured()) {
-      console.info("[support] MOCK ticket (SMTP no configurado)", {
-        to: supportTo,
-        from: user.email,
-        subject: mailSubject,
-        labId,
-      });
-      console.info("[support] MOCK body:\n" + body);
-
-      await writeAudit(req, {
-        labId,
-        action: "support.ticket",
-        detail: `[mock] ${subject.slice(0, 160)}`,
-      });
-
-      return res.json({
-        ok: true,
-        mocked: true,
-        message:
-          "Ticket registrado (modo prueba: el correo aún no está conectado). Quedó en auditoría del laboratorio.",
-      });
-    }
-
-    const from = process.env.SMTP_FROM?.trim() || process.env.SMTP_USER!;
-    const port = Number(process.env.SMTP_PORT || 587);
-    const secure = process.env.SMTP_SECURE === "true" || port === 465;
-
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port,
-      secure,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
-    });
-
-    await transporter.sendMail({
-      from,
+    const mail = await sendMail({
       to: supportTo,
       replyTo: user.email,
       subject: mailSubject,
@@ -100,8 +57,18 @@ supportRouter.post("/v1/support/tickets", requireAuth, async (req, res) => {
     await writeAudit(req, {
       labId,
       action: "support.ticket",
-      detail: subject.slice(0, 180),
+      detail: `${mail.mocked ? "[mock] " : ""}${subject.slice(0, 160)}`,
     });
+
+    if (mail.mocked) {
+      return res.json({
+        ok: true,
+        mocked: true,
+        smtpPending: !smtpConfigured(),
+        message:
+          "Ticket registrado (modo prueba: el correo aún no está conectado). Quedó en auditoría del laboratorio.",
+      });
+    }
 
     return res.json({
       ok: true,

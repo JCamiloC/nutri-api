@@ -30,6 +30,7 @@ grep '^DATABASE_URL=' .env
 git fetch + reset --hard origin/main
 npm ci
 npm run db:migrate          # ANTES de reiniciar; usa .env / DATABASE_URL
+npm run db:import-catalog   # ICBF 100% + base Enerxis (Excel en data/); idempotente
 npm run build               # best-effort mientras tsc falle en upstream
 pm2 restart nutri-api       # solo si migrate (y el resto del script) OK
 ```
@@ -37,7 +38,11 @@ pm2 restart nutri-api       # solo si migrate (y el resto del script) OK
 Reglas:
 
 - **Migrate antes del restart.**
-- Si `db:migrate` falla → `set -e` aborta el script → **no se reinicia** la app.
+- Luego **`db:import-catalog`** (Excel versionados en `data/`):
+  - `BD_ICBF.xlsx` → `icbf_foods` (TRUNCATE + carga completa; vacíos → 0)
+  - `BASE_ENERXIS_INGREDIENTES.xlsx` → `ingredients` con `is_base=true` (upsert; vacíos → 0)
+  - Skip parcial: `SKIP_ICBF_IMPORT=1` / `SKIP_BASE_IMPORT=1`
+- Si `db:migrate` o `db:import-catalog` falla → `set -e` aborta → **no se reinicia** la app.
 - **No** se ejecutan `db:seed` / `db:seed-users` en producción.
 - Logs: `/var/log/nutri-deploy.log`
 
@@ -92,9 +97,22 @@ psql "$DATABASE_URL" -c "SELECT id, applied_at FROM schema_migrations ORDER BY i
 psql "$DATABASE_URL" -c "\d formula_versions"
 ```
 
-**No** correr `db:seed` / `db:seed-base` en producción salvo decisión comercial explícita (base Enerxis).
+**No** correr `db:seed` / `db:seed-users` en producción.
+La base Enerxis y el ICBF van con `npm run db:import-catalog` (ver arriba).
+`db:seed-base` es alias local de `db:import-base-excel`.
+
+**Permisos base:** clientes ven/usan y pueden **duplicar**; solo **superadmin** (Enerxis) edita `is_base`.
 
 Front (nutri-saas): deploy FTP/Actions **no** migra BD; solo apunta a `NEXT_PUBLIC_API_URL`.
+
+## Auth / sesiones
+
+- Access JWT corto (`JWT_EXPIRES_IN`, default `1h`) + **refresh token** en BD (`010_auth_sessions.sql`).
+- Login devuelve `token` + `refreshToken`. Logout llama `POST /v1/auth/logout` (revoca).
+- Cambiar contraseña: `POST /v1/auth/change-password` (revoca otras sesiones).
+- Forgot/reset: endpoints listos; **correo real requiere SMTP**. Sin SMTP → mock + en dev `devResetUrl`.
+- Invitación: intenta email; sin SMTP sigue devolviendo `temporaryPassword` para copiar.
+- Self-signup: `POST /v1/auth/signup` → `503 signup_pending` hasta política + SMTP.
 
 ## Mesa de ayuda (tickets por correo)
 

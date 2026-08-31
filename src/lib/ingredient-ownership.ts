@@ -8,7 +8,14 @@ export function isIngredientEditable(
 ): boolean {
   if (!viewer) return false;
   if (row.source !== "BD") return false;
-  if (row.is_base === true || row.read_only === true) return false;
+
+  // Base global Enerxis: solo personal Enerxis (superadmin) puede editar.
+  // Clientes la ven/usan y duplican a su inventario.
+  if (row.is_base === true) {
+    return viewer.role === "superadmin";
+  }
+
+  if (row.read_only === true) return false;
 
   const createdBy = row.created_by_user_id == null ? null : String(row.created_by_user_id);
   if (createdBy) return createdBy === viewer.id;

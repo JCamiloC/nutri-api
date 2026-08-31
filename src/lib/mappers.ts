@@ -138,7 +138,7 @@ export function mapIngredient(
     estado: row.estado,
     proveedor: row.proveedor,
     tipo: row.tipo,
-    readOnly: row.read_only === true || row.is_base === true || !editable,
+    readOnly: !editable,
     isBase: row.is_base === true,
     createdByUserId: row.created_by_user_id ?? null,
     copiedFromId: row.copied_from_id ?? null,

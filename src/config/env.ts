@@ -15,7 +15,9 @@ export const env = {
   databaseUrl: process.env.DATABASE_URL ?? "",
   usdaApiKey: process.env.USDA_API_KEY ?? "",
   jwtSecret: process.env.JWT_SECRET ?? "nutri-dev-secret-change-me",
-  jwtExpiresIn: process.env.JWT_EXPIRES_IN ?? "7d",
+  /** Access JWT. Con refresh, preferir corto (1h). Override con JWT_EXPIRES_IN. */
+  jwtExpiresIn: process.env.JWT_EXPIRES_IN ?? "1h",
+  refreshTokenDays: Number(process.env.REFRESH_TOKEN_DAYS ?? 30),
 };
 
 export function assertDatabaseUrl(): string {

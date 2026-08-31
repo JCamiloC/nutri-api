@@ -4,9 +4,11 @@ import { Router } from "express";
 import { z } from "zod";
 import { getPool } from "../db/pool.js";
 import { writeAudit } from "../lib/audit.js";
+import { appPublicUrl, sendMail } from "../lib/mailer.js";
 import { resolveLabId } from "../lib/mappers.js";
 import { getLabCapacity } from "../lib/quota.js";
 import { requireAuth, requireWrite } from "../middleware/auth.js";
+
 
 export const usersRouter = Router();
 
@@ -136,12 +138,35 @@ usersRouter.post("/v1/lab/users", requireAuth, requireWrite, async (req, res) =>
         detail: `${user.email} · ${user.role}`,
       });
 
+      const loginUrl = `${appPublicUrl().replace(/\/$/, "")}/login/`;
+      const mail = await sendMail({
+        to: user.email,
+        subject: "Invitación a NutriLab — Enerxis",
+        text: [
+          `Hola ${user.name},`,
+          ``,
+          `Te invitaron a NutriLab.`,
+          `Accede en: ${loginUrl}`,
+          `Email: ${user.email}`,
+          data.password
+            ? `Usa la contraseña que te indicaron.`
+            : `Contraseña temporal: ${tempPassword}`,
+          ``,
+          `Te recomendamos cambiarla al entrar (Cuenta → Cambiar contraseña).`,
+        ].join("\n"),
+      });
+
       return res.status(201).json({
         user,
-        temporaryPassword: data.password ? undefined : tempPassword,
-        message: data.password
-          ? "Usuario creado"
-          : "Usuario creado. Comparte la contraseña temporal de forma segura.",
+        // Sin SMTP seguimos devolviendo la temporal para copiar/pegar (flujo actual).
+        temporaryPassword: mail.mocked && !data.password ? tempPassword : undefined,
+        emailSent: !mail.mocked,
+        smtpPending: mail.mocked,
+        message: mail.mocked
+          ? data.password
+            ? "Usuario creado (correo pendiente de SMTP)."
+            : "Usuario creado. Comparte la contraseña temporal de forma segura (SMTP aún no configurado)."
+          : "Usuario creado. Se envió el correo de invitación.",
       });
     } catch (error) {
       const err = error as { code?: string };
