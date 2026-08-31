@@ -78,8 +78,12 @@ labRouter.get("/v1/lab", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "not_found" });
     }
     const capacity = await getLabCapacity(labId);
+    const mapped = mapLab(result.rows[0], requestBase(req));
     return res.json({
-      ...mapLab(result.rows[0], requestBase(req)),
+      ...mapped,
+      // getLabCapacity puede haber avanzado renews_at al rodar el ciclo
+      renewsAt: capacity?.renewsAt ?? mapped.renewsAt,
+      tablesExtra: capacity?.tablesExtra ?? mapped.tablesExtra,
       capacity,
     });
   } catch (error) {

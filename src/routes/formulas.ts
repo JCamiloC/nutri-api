@@ -131,6 +131,16 @@ const sealOverridesSchema = z
   .optional()
   .nullable();
 
+const tableFormatsSchema = z
+  .object({
+    estandar: z.boolean(),
+    simplificada: z.boolean(),
+    lineal: z.boolean(),
+    tabular: z.boolean(),
+  })
+  .optional()
+  .nullable();
+
 const createBody = z.object({
   title: z.string().min(1),
   productName: z.string().optional(),
@@ -153,6 +163,10 @@ const createBody = z.object({
   manufacturedBy: z.string().optional().nullable(),
   manufacturedFor: z.string().optional().nullable(),
   sealOverrides: sealOverridesSchema,
+  nutrientToggles: z.record(z.boolean()).optional().nullable(),
+  tableFormats: tableFormatsSchema,
+  ingredientListText: z.string().optional().nullable(),
+  allergenListText: z.string().optional().nullable(),
   lines: z
     .array(
       z.object({
@@ -248,11 +262,17 @@ formulasRouter.post("/v1/formulas", requireAuth, requireWrite, async (req, res) 
         data.storageMode?.trim() || null,
         data.manufacturedBy ?? lab.manufactured_by_default ?? null,
         data.manufacturedFor ?? lab.manufactured_for_default ?? null,
-        JSON.stringify(
-          data.sealOverrides
-            ? { sealOverrides: data.sealOverrides }
-            : {},
-        ),
+        JSON.stringify({
+          ...(data.sealOverrides ? { sealOverrides: data.sealOverrides } : {}),
+          ...(data.nutrientToggles ? { nutrientToggles: data.nutrientToggles } : {}),
+          ...(data.tableFormats ? { tableFormats: data.tableFormats } : {}),
+          ...(data.ingredientListText != null
+            ? { ingredientListText: data.ingredientListText }
+            : {}),
+          ...(data.allergenListText != null
+            ? { allergenListText: data.allergenListText }
+            : {}),
+        }),
       ],
     );
 
@@ -384,13 +404,32 @@ formulasRouter.patch("/v1/formulas/:id", requireAuth, requireWrite, async (req, 
       existing.rows[0].meta && typeof existing.rows[0].meta === "object"
         ? (existing.rows[0].meta as Record<string, unknown>)
         : {};
-    const nextMeta =
-      d.sealOverrides !== undefined
-        ? {
-            ...existingMeta,
-            sealOverrides: d.sealOverrides,
-          }
-        : existingMeta;
+    const labelMetaTouched =
+      d.sealOverrides !== undefined ||
+      d.nutrientToggles !== undefined ||
+      d.tableFormats !== undefined ||
+      d.ingredientListText !== undefined ||
+      d.allergenListText !== undefined;
+    const nextMeta = labelMetaTouched
+      ? {
+          ...existingMeta,
+          ...(d.sealOverrides !== undefined
+            ? { sealOverrides: d.sealOverrides }
+            : {}),
+          ...(d.nutrientToggles !== undefined
+            ? { nutrientToggles: d.nutrientToggles }
+            : {}),
+          ...(d.tableFormats !== undefined
+            ? { tableFormats: d.tableFormats }
+            : {}),
+          ...(d.ingredientListText !== undefined
+            ? { ingredientListText: d.ingredientListText }
+            : {}),
+          ...(d.allergenListText !== undefined
+            ? { allergenListText: d.allergenListText }
+            : {}),
+        }
+      : existingMeta;
 
     const updated = await client.query(
       `UPDATE formulas SET
@@ -445,7 +484,7 @@ formulasRouter.patch("/v1/formulas/:id", requireAuth, requireWrite, async (req, 
         d.flavor === undefined ? null : d.flavor?.trim() || "",
         d.usageMode === undefined ? null : d.usageMode?.trim() || "",
         d.storageMode === undefined ? null : d.storageMode?.trim() || "",
-        d.sealOverrides !== undefined ? JSON.stringify(nextMeta) : null,
+        labelMetaTouched ? JSON.stringify(nextMeta) : null,
       ],
     );
 
@@ -587,6 +626,7 @@ formulasRouter.post("/v1/formulas/:id/recalculate", requireAuth, requireWrite, a
     const result = recalculateFormula({
       packageWeight: Number(formula.package_weight) || 100,
       reconstitutedServing: Number(formula.reconstituted_serving) || 0,
+      waterPerServing: Number(formula.water_per_serving) || 0,
       formulaType: (formula.formula_type as FormulaType) || "Solido",
       lines: engineLines,
     });
@@ -616,6 +656,8 @@ formulasRouter.post("/v1/formulas/:id/recalculate", requireAuth, requireWrite, a
       packageWeight: Number(formula.package_weight),
       servings: Number(formula.servings),
       servingSize: Number(formula.serving_size),
+      reconstitutedServing: Number(formula.reconstituted_serving) || 0,
+      waterPerServing: Number(formula.water_per_serving) || 0,
       rsa: mapped.rsa,
       flavor: mapped.flavor,
       usageMode: mapped.usageMode,
@@ -710,6 +752,7 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
     const result = recalculateFormula({
       packageWeight: Number(formula.package_weight) || 100,
       reconstitutedServing: Number(formula.reconstituted_serving) || 0,
+      waterPerServing: Number(formula.water_per_serving) || 0,
       formulaType: (formula.formula_type as FormulaType) || "Solido",
       lines: engineLines,
     });
@@ -818,7 +861,7 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
       await client.query("ROLLBACK");
       return res.status(403).json({
         error: "quota_exceeded",
-        message: `Cupo de emisiones agotado (${capacityBefore?.used ?? 0}/${capacityBefore?.total ?? 0} versiones). Solicita un pack extra o un plan superior. Cotizar/recalcular no gasta cupo; solo una versión nueva.`,
+        message: `Cupo de emisiones del ciclo agotado (${capacityBefore?.used ?? 0}/${capacityBefore?.total ?? 0} versiones). Solicita un pack extra o un plan superior. Cotizar/recalcular no gasta cupo; solo una versión nueva. El cupo base se renueva el ${capacityBefore?.renewsAt ?? "—"}.`,
         capacity: capacityBefore,
       });
     }

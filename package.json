@@ -22,7 +22,8 @@
     "db:import-sample": "tsx src/db/import-enerxis-sample.ts",
     "db:import-icbf": "tsx src/db/import-icbf.ts",
     "db:import-icbf-excel": "tsx src/db/import-icbf-excel.ts",
-    "test:engine": "tsx src/nutrition-engine/smoke.ts"
+    "test:engine": "tsx src/nutrition-engine/smoke.ts",
+    "test:quota": "tsx src/lib/quota-cycle.smoke.ts"
   },
   "engines": {
     "node": ">=20"

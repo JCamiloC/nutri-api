@@ -78,6 +78,12 @@ Al hacer push a `main` del repo API, el webhook debe aplicar automáticamente:
 
 - `005_ingredient_ownership.sql` — ownership global de ingredientes
 - `006_formula_versions.sql` — versionado comercial + backfill de exportadas
+- `007_label_fields.sql` — campos de rotulado / toggles
+- `008_quota_cycle_index.sql` — índice cupo billable por ciclo (`created_at`)
+
+**Cupo:** `getLabCapacity` cuenta solo versiones `billable` del ciclo
+`[renews_at − 1 mes, renews_at)`. Si `renews_at` ya pasó, avanza la fecha,
+pone `tables_extra = 0` y el uso del ciclo anterior deja de contar.
 
 Verificar post-deploy:
 

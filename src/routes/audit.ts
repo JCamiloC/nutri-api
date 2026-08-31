@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { getPool } from "../db/pool.js";
 import { resolveLabId } from "../lib/mappers.js";
+import { getLabCapacity } from "../lib/quota.js";
 import { requireAuth } from "../middleware/auth.js";
 
 export const auditRouter = Router();
@@ -57,6 +58,15 @@ auditRouter.get("/v1/lab/audit", requireAuth, async (req, res) => {
   try {
     const labId = getLabId(req, res);
     if (!labId) return;
+
+    const capacity = await getLabCapacity(labId);
+    if (capacity?.plan && capacity.plan.auditLog === false) {
+      return res.status(403).json({
+        error: "feature_not_in_plan",
+        message:
+          "El plan actual no incluye auditoría. Solicita un plan superior o contacta a Enerxis.",
+      });
+    }
 
     const limit = parsed.data.limit ?? 50;
     const offset = parsed.data.offset ?? 0;

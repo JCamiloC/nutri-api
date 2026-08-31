@@ -15,7 +15,7 @@ import {
  * - micros: array vitaminas [{ nombre, valor }] con nombres legacy (VitaminA, Iron, …)
  * - Solido/Liquido: per100 = totales; perServing = totales * (packageWeight/100)
  * - Reconstituida: per100 = totales * (ml100/100); perServing = totales * (reconstitutedServing/100)
- *   donde ml100 = reconstitutedServing * 100 / packageWeight
+ *   donde ml100 = reconstitutedServing * 100 / water (waterPerServing || packageWeight)
  */
 
 export type IngredientSource = "ICBF" | "BD" | "API";
@@ -166,10 +166,12 @@ export interface FormulaLine {
 export interface RecalculateInput {
   lines: FormulaLine[];
   formulaType?: FormulaType;
-  /** Enerxis `peso` — peso neto del paquete / base (g o mL). */
+  /** Enerxis `peso` — peso neto del paquete / base (g o mL). En Reconstituida = agua por porción. */
   packageWeight: number;
-  /** Enerxis `porcionRec` — ml de porción reconstituida. */
+  /** Enerxis `porcionRec` — g de polvo por porción reconstituida. */
   reconstitutedServing?: number;
+  /** Enerxis `aguaPorcion` (campo “peso neto” swap) — solo informativo; ml100 usa packageWeight como agua. */
+  waterPerServing?: number;
 }
 
 export interface NutrientRowResult {
@@ -288,16 +290,19 @@ function scaleFactors(input: RecalculateInput): { per100: number; perServing: nu
   const type = input.formulaType ?? "Solido";
   const packageWeight = Math.max(0, num(input.packageWeight));
   const reconstituted = Math.max(0, num(input.reconstitutedServing));
+  // Legacy Reconstituida: agua diluye el polvo (ml100).
+  // Preferimos waterPerServing; si viene vacío, packageWeight (fórmulas viejas).
+  const water = Math.max(0, num(input.waterPerServing) || packageWeight);
 
   if (type === "Reconstituida") {
-    const ml100 = packageWeight > 0 ? (reconstituted * 100) / packageWeight : 0;
+    const ml100 = water > 0 ? (reconstituted * 100) / water : 0;
     return {
       per100: ml100 / 100,
       perServing: reconstituted / 100,
     };
   }
 
-  // Solido y Liquido (legacy)
+  // Solido y Liquido (legacy): columna “Por porción” = totales × (peso neto / 100)
   return {
     per100: 1,
     perServing: packageWeight / 100,

@@ -38,6 +38,21 @@ export function mapFormula(row: Record<string, unknown>) {
     meta.sealOverrides && typeof meta.sealOverrides === "object"
       ? (meta.sealOverrides as Record<string, unknown>)
       : null;
+  const nutrientToggles =
+    meta.nutrientToggles && typeof meta.nutrientToggles === "object"
+      ? (meta.nutrientToggles as Record<string, boolean>)
+      : null;
+  const rawTables = meta.tableFormats;
+  const tableFormats =
+    rawTables && typeof rawTables === "object"
+      ? {
+          estandar: (rawTables as Record<string, unknown>).estandar !== false,
+          simplificada:
+            (rawTables as Record<string, unknown>).simplificada !== false,
+          lineal: (rawTables as Record<string, unknown>).lineal !== false,
+          tabular: (rawTables as Record<string, unknown>).tabular !== false,
+        }
+      : null;
   const sweetRaw = row.sweetener;
   const containsSweetener =
     sweetRaw === true ||
@@ -79,6 +94,12 @@ export function mapFormula(row: Record<string, unknown>) {
           edulcorante: sealOverrides.edulcorante === true,
         }
       : null,
+    nutrientToggles,
+    tableFormats,
+    ingredientListText:
+      typeof meta.ingredientListText === "string" ? meta.ingredientListText : null,
+    allergenListText:
+      typeof meta.allergenListText === "string" ? meta.allergenListText : null,
     meta,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
