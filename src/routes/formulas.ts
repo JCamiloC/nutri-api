@@ -625,6 +625,7 @@ formulasRouter.post("/v1/formulas/:id/recalculate", requireAuth, requireWrite, a
 
     const result = recalculateFormula({
       packageWeight: Number(formula.package_weight) || 100,
+      servingSize: Number(formula.serving_size) || 0,
       reconstitutedServing: Number(formula.reconstituted_serving) || 0,
       waterPerServing: Number(formula.water_per_serving) || 0,
       formulaType: (formula.formula_type as FormulaType) || "Solido",
@@ -751,6 +752,7 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
 
     const result = recalculateFormula({
       packageWeight: Number(formula.package_weight) || 100,
+      servingSize: Number(formula.serving_size) || 0,
       reconstitutedServing: Number(formula.reconstituted_serving) || 0,
       waterPerServing: Number(formula.water_per_serving) || 0,
       formulaType: (formula.formula_type as FormulaType) || "Solido",

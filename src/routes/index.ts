@@ -85,7 +85,9 @@ const nutrientProfile = z
 
 const recalculateBody = z.object({
   packageWeight: z.number().positive(),
+  servingSize: z.number().positive().optional(),
   reconstitutedServing: z.number().nonnegative().optional(),
+  waterPerServing: z.number().nonnegative().optional(),
   formulaType: z.enum(["Solido", "Liquido", "Reconstituida"]).optional(),
   lines: z
     .array(
@@ -119,7 +121,9 @@ router.post("/v1/recalculate", requireAuth, (req, res) => {
 
   const result = recalculateFormula({
     packageWeight: parsed.data.packageWeight,
+    servingSize: parsed.data.servingSize,
     reconstitutedServing: parsed.data.reconstitutedServing,
+    waterPerServing: parsed.data.waterPerServing,
     formulaType: parsed.data.formulaType as FormulaType | undefined,
     lines: parsed.data.lines.map((line) => ({
       source: line.source as IngredientSource,

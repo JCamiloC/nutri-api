@@ -13,9 +13,9 @@ import {
  * - macros: valor_per_100g_ingrediente * factor
  * - calorías calculadas: (grasa*9) + ((carb-fibra)*4) + (fibra*2) + (proteina*4)
  * - micros: array vitaminas [{ nombre, valor }] con nombres legacy (VitaminA, Iron, …)
- * - Solido/Liquido: per100 = totales; perServing = totales * (packageWeight/100)
+ * - Solido/Liquido: per100 = totales; perServing = totales * (servingSize/100)
  * - Reconstituida: per100 = totales * (ml100/100); perServing = totales * (reconstitutedServing/100)
- *   donde ml100 = reconstitutedServing * 100 / water (waterPerServing || packageWeight)
+ *   donde ml100 = reconstitutedServing * 100 / waterPerServing
  */
 
 export type IngredientSource = "ICBF" | "BD" | "API";
@@ -166,11 +166,13 @@ export interface FormulaLine {
 export interface RecalculateInput {
   lines: FormulaLine[];
   formulaType?: FormulaType;
-  /** Enerxis `peso` — peso neto del paquete / base (g o mL). En Reconstituida = agua por porción. */
+  /** Peso neto del envase (g sólido / mL líquido). Reconstituida = g polvo total en paquete. */
   packageWeight: number;
-  /** Enerxis `porcionRec` — g de polvo por porción reconstituida. */
+  /** Tamaño de una porción (g sólido / mL vaso 200|240). */
+  servingSize?: number;
+  /** g de polvo por porción reconstituida. */
   reconstitutedServing?: number;
-  /** Enerxis `aguaPorcion` (campo “peso neto” swap) — solo informativo; ml100 usa packageWeight como agua. */
+  /** mL de agua por porción reconstituida. */
   waterPerServing?: number;
 }
 
@@ -289,10 +291,9 @@ function accumulateVitamins(
 function scaleFactors(input: RecalculateInput): { per100: number; perServing: number } {
   const type = input.formulaType ?? "Solido";
   const packageWeight = Math.max(0, num(input.packageWeight));
+  const servingSize = Math.max(0, num(input.servingSize));
   const reconstituted = Math.max(0, num(input.reconstitutedServing));
-  // Legacy Reconstituida: agua diluye el polvo (ml100).
-  // Preferimos waterPerServing; si viene vacío, packageWeight (fórmulas viejas).
-  const water = Math.max(0, num(input.waterPerServing) || packageWeight);
+  const water = Math.max(0, num(input.waterPerServing));
 
   if (type === "Reconstituida") {
     const ml100 = water > 0 ? (reconstituted * 100) / water : 0;
@@ -302,10 +303,11 @@ function scaleFactors(input: RecalculateInput): { per100: number; perServing: nu
     };
   }
 
-  // Solido y Liquido (legacy): columna “Por porción” = totales × (peso neto / 100)
+  // Una porción = servingSize (g o mL). Si falta, asumir envase monoporción.
+  const portionWeight = servingSize > 0 ? servingSize : packageWeight;
   return {
     per100: 1,
-    perServing: packageWeight / 100,
+    perServing: portionWeight / 100,
   };
 }
 

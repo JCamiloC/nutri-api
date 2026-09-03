@@ -25,6 +25,7 @@
     "db:import-base-excel": "tsx src/db/import-base-excel.ts",
     "db:import-catalog": "tsx src/db/import-catalog.ts",
     "test:engine": "tsx src/nutrition-engine/smoke.ts",
+    "test:serving": "tsx src/nutrition-engine/serving-scale.smoke.ts",
     "test:quota": "tsx src/lib/quota-cycle.smoke.ts",
     "test:auth": "tsx src/db/auth-smoke.ts"
   },
