@@ -2,6 +2,11 @@ import { Router } from "express";
 import { z } from "zod";
 import { getPool } from "../db/pool.js";
 import { writeAudit } from "../lib/audit.js";
+import {
+  createOnboardedAdmin,
+  publicOnboardMail,
+  rotateOnboardPassword,
+} from "../lib/onboard-admin.js";
 import { getLabCapacity, mapExtraPack, mapPlan } from "../lib/quota.js";
 import { requireAuth, requireSuperadmin, requireWrite } from "../middleware/auth.js";
 
@@ -112,11 +117,13 @@ plansRouter.get("/v1/labs", requireAuth, requireSuperadmin, async (_req, res) =>
       labs.rows.map(async (row) => {
         const capacity = await getLabCapacity(String(row.id));
         const admin = await getPool().query(
-          `SELECT name, email FROM users
+          `SELECT name, email, must_change_password, mfa_enabled, email_confirmed_at
+           FROM users
            WHERE lab_id = $1 AND role = 'lab_admin' AND active = true
            ORDER BY created_at ASC LIMIT 1`,
           [row.id],
         );
+        const adminRow = admin.rows[0];
         return {
           id: row.id,
           name: row.name,
@@ -127,8 +134,11 @@ plansRouter.get("/v1/labs", requireAuth, requireSuperadmin, async (_req, res) =>
           renewsAt: row.renews_at ? String(row.renews_at).slice(0, 10) : null,
           tablesUsed: capacity?.used ?? 0,
           tablesTotal: capacity?.total ?? 0,
-          adminName: admin.rows[0]?.name ?? null,
-          adminEmail: admin.rows[0]?.email ?? null,
+          adminName: adminRow?.name ?? null,
+          adminEmail: adminRow?.email ?? null,
+          adminPendingFirstLogin: Boolean(adminRow?.must_change_password),
+          adminMfaEnabled: Boolean(adminRow?.mfa_enabled),
+          adminEmailConfirmed: Boolean(adminRow?.email_confirmed_at),
           capacity,
         };
       }),
@@ -149,7 +159,163 @@ const assignBody = z.object({
   status: z.enum(["activo", "pendiente", "suspendido"]).optional(),
   renewsAt: z.string().optional().nullable(),
   note: z.string().optional(),
+  adminName: z.string().trim().min(1).max(120).optional(),
+  adminEmail: z.string().trim().email().max(200).optional(),
 });
+
+const adminFields = z.object({
+  adminName: z.string().trim().min(1).max(120),
+  adminEmail: z.string().trim().email().max(200),
+});
+
+const onboardBody = z
+  .object({
+    labName: z.string().trim().min(1).max(160),
+    city: z.string().trim().max(80).optional().nullable(),
+    planId: z.string().min(1),
+    extraPackId: z.string().optional().nullable(),
+    status: z.enum(["activo", "pendiente", "suspendido"]).optional(),
+    renewsAt: z.string().optional().nullable(),
+    note: z.string().optional(),
+  })
+  .merge(adminFields);
+
+function defaultRenewsAt(): string {
+  const d = new Date();
+  d.setUTCMonth(d.getUTCMonth() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+async function resolveTablesExtra(
+  pool: ReturnType<typeof getPool>,
+  currentExtra: number,
+  d: { tablesExtra?: number; extraPackId?: string | null },
+): Promise<{ ok: true; tablesExtra: number } | { ok: false; status: number; body: object }> {
+  if (d.tablesExtra !== undefined) {
+    return { ok: true, tablesExtra: d.tablesExtra };
+  }
+  let tablesExtra = currentExtra;
+  if (d.extraPackId) {
+    const pack = await pool.query(`SELECT * FROM extra_packs WHERE id = $1`, [d.extraPackId]);
+    if (!pack.rows[0]) {
+      return { ok: false, status: 404, body: { error: "extra_pack_not_found" } };
+    }
+    tablesExtra += Number(pack.rows[0].tables_count);
+  }
+  return { ok: true, tablesExtra };
+}
+
+plansRouter.post(
+  "/v1/labs/onboard",
+  requireAuth,
+  requireSuperadmin,
+  async (req, res) => {
+    const parsed = onboardBody.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+    }
+
+    const d = parsed.data;
+    const pool = getPool();
+    const client = await pool.connect();
+
+    try {
+      const plan = await client.query(`SELECT * FROM plans WHERE id = $1`, [d.planId]);
+      if (!plan.rows[0]) {
+        return res.status(404).json({ error: "plan_not_found" });
+      }
+
+      const extra = await resolveTablesExtra(pool, 0, d);
+      if (!extra.ok) {
+        return res.status(extra.status).json(extra.body);
+      }
+
+      const email = d.adminEmail.trim().toLowerCase();
+      const taken = await client.query(`SELECT id FROM users WHERE lower(email) = $1`, [email]);
+      if (taken.rows[0]) {
+        return res.status(409).json({
+          error: "email_taken",
+          message: "Ya existe un usuario con ese correo",
+        });
+      }
+
+      await client.query("BEGIN");
+      const labInsert = await client.query(
+        `INSERT INTO labs (name, status, plan_id, tables_extra, city, renews_at)
+         VALUES ($1, $2, $3, $4, $5, $6::date)
+         RETURNING *`,
+        [
+          d.labName.trim(),
+          d.status ?? "activo",
+          d.planId,
+          extra.tablesExtra,
+          d.city?.trim() || null,
+          d.renewsAt?.trim() || defaultRenewsAt(),
+        ],
+      );
+      const lab = labInsert.rows[0];
+      await client.query("COMMIT");
+
+      let onboard;
+      try {
+        onboard = await createOnboardedAdmin(pool, {
+          labId: String(lab.id),
+          labName: String(lab.name),
+          name: d.adminName,
+          email,
+        });
+      } catch (error) {
+        const err = error as { code?: string };
+        if (err.code === "23505") {
+          return res.status(409).json({
+            error: "email_taken",
+            message: "Ya existe un usuario con ese correo",
+          });
+        }
+        throw error;
+      }
+
+      await writeAudit(req, {
+        labId: String(lab.id),
+        action: "lab.onboard",
+        detail: [
+          `lab=${lab.name}`,
+          `plan=${d.planId}`,
+          `admin=${onboard.email}`,
+          d.note ? `nota=${d.note}` : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      });
+
+      const capacity = await getLabCapacity(String(lab.id));
+      const mail = publicOnboardMail(onboard);
+      return res.status(201).json({
+        lab: {
+          id: lab.id,
+          name: lab.name,
+          status: lab.status,
+          planId: lab.plan_id,
+          tablesExtra: Number(lab.tables_extra),
+          city: lab.city,
+          renewsAt: lab.renews_at ? String(lab.renews_at).slice(0, 10) : null,
+        },
+        capacity,
+        ...mail,
+      });
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        /* ignore */
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      return res.status(500).json({ error: "onboard_lab_failed", message });
+    } finally {
+      client.release();
+    }
+  },
+);
 
 plansRouter.post(
   "/v1/labs/:id/assign",
@@ -225,6 +391,42 @@ plansRouter.post(
           .join(" · "),
       });
 
+      const existingAdmin = await pool.query(
+        `SELECT id, email, name, must_change_password
+         FROM users
+         WHERE lab_id = $1 AND role = 'lab_admin' AND active = true
+         ORDER BY created_at ASC LIMIT 1`,
+        [req.params.id],
+      );
+
+      let mail: ReturnType<typeof publicOnboardMail> | null = null;
+      if (!existingAdmin.rows[0]) {
+        if (!d.adminName || !d.adminEmail) {
+          return res.status(400).json({
+            error: "admin_required",
+            message: "Este laboratorio no tiene admin. Ingresa nombre y correo del cliente (sin contraseña).",
+          });
+        }
+        try {
+          const onboard = await createOnboardedAdmin(pool, {
+            labId: String(req.params.id),
+            labName: String(updated.rows[0].name),
+            name: d.adminName,
+            email: d.adminEmail,
+          });
+          mail = publicOnboardMail(onboard);
+        } catch (error) {
+          const err = error as { code?: string };
+          if (err.code === "23505") {
+            return res.status(409).json({
+              error: "email_taken",
+              message: "Ya existe un usuario con ese correo",
+            });
+          }
+          throw error;
+        }
+      }
+
       const capacity = await getLabCapacity(String(req.params.id));
       return res.json({
         lab: {
@@ -238,10 +440,62 @@ plansRouter.post(
             : null,
         },
         capacity,
+        ...(mail ?? {}),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return res.status(500).json({ error: "assign_plan_failed", message });
+    }
+  },
+);
+
+plansRouter.post(
+  "/v1/labs/:id/resend-welcome",
+  requireAuth,
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const pool = getPool();
+      const lab = await pool.query(`SELECT id, name FROM labs WHERE id = $1`, [req.params.id]);
+      if (!lab.rows[0]) {
+        return res.status(404).json({ error: "lab_not_found" });
+      }
+      const admin = await pool.query(
+        `SELECT id, email, name, must_change_password, email_confirmed_at
+         FROM users
+         WHERE lab_id = $1 AND role = 'lab_admin' AND active = true
+         ORDER BY created_at ASC LIMIT 1`,
+        [req.params.id],
+      );
+      const row = admin.rows[0];
+      if (!row) {
+        return res.status(400).json({
+          error: "admin_missing",
+          message: "Este laboratorio no tiene admin. Confirma el pago e ingresa sus datos.",
+        });
+      }
+      if (row.email_confirmed_at && !row.must_change_password) {
+        return res.status(400).json({
+          error: "already_confirmed",
+          message: "Este admin ya completó el primer acceso. No se reenvía la contraseña temporal.",
+        });
+      }
+
+      const onboard = await rotateOnboardPassword(pool, {
+        userId: String(row.id),
+        labName: String(lab.rows[0].name),
+        name: String(row.name),
+        email: String(row.email),
+      });
+      await writeAudit(req, {
+        labId: String(req.params.id),
+        action: "lab.resend_welcome",
+        detail: onboard.email,
+      });
+      return res.json(publicOnboardMail(onboard));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return res.status(500).json({ error: "resend_welcome_failed", message });
     }
   },
 );

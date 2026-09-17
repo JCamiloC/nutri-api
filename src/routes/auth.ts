@@ -4,6 +4,14 @@ import { z } from "zod";
 import { getPool } from "../db/pool.js";
 import { writeAudit } from "../lib/audit.js";
 import {
+  bumpChallengeAttempts,
+  consumeChallenge,
+  createChallenge,
+  findOpenChallenge,
+  mfaCodeHash,
+} from "../lib/auth-challenges.js";
+import { sendMfaCodeEmail, sendPasswordResetEmail } from "../lib/auth-emails.js";
+import {
   hashToken,
   issueRefreshToken,
   newOpaqueToken,
@@ -12,9 +20,10 @@ import {
   revokeRefreshToken,
   rotateRefreshToken,
 } from "../lib/auth-tokens.js";
-import { appPublicUrl, sendMail, smtpConfigured } from "../lib/mailer.js";
+import { appPublicUrl, smtpConfigured } from "../lib/mailer.js";
+import { generateMfaCode, mfaCodeTtlMinutes } from "../lib/passwords.js";
 import { requireAuth, signAccessToken } from "../middleware/auth.js";
-import type { UserRole } from "../types/auth.js";
+import type { AuthUser, UserRole } from "../types/auth.js";
 
 export const authRouter = Router();
 
@@ -27,6 +36,22 @@ const changePasswordBody = z.object({
   currentPassword: z.string().min(1),
   newPassword: z.string().min(8).max(72),
 });
+
+const firstLoginBody = z.object({
+  setupToken: z.string().min(20),
+  newPassword: z.string().min(8).max(72),
+});
+
+const mfaVerifyBody = z.object({
+  mfaToken: z.string().min(20),
+  code: z.string().regex(/^\d{6}$/, "El código debe tener 6 dígitos"),
+});
+
+const mfaResendBody = z.object({
+  mfaToken: z.string().min(20),
+});
+
+const MFA_MAX_ATTEMPTS = 5;
 
 const forgotBody = z.object({
   email: z.string().email(),
@@ -71,13 +96,107 @@ function mapAuthUser(row: {
 
 async function loadActiveUser(userId: string) {
   const result = await getPool().query(
-    `SELECT id, email, name, password_hash, role, lab_id, active
+    `SELECT id, email, name, password_hash, role, lab_id, active,
+            must_change_password, mfa_enabled, email_confirmed_at
      FROM users WHERE id = $1 LIMIT 1`,
     [userId],
   );
   const user = result.rows[0];
   if (!user || !user.active) return null;
   return user;
+}
+
+function authUserFromRow(row: {
+  id: string;
+  email: string;
+  name: string;
+  role: UserRole;
+  lab_id: string | null;
+}): AuthUser {
+  return mapAuthUser(row);
+}
+
+async function issueFullSession(
+  req: Parameters<typeof writeAudit>[0],
+  user: {
+    id: string;
+    email: string;
+    name: string;
+    role: UserRole;
+    lab_id: string | null;
+  },
+) {
+  const pool = getPool();
+  const authUser = authUserFromRow(user);
+  const token = signAccessToken(authUser);
+  const { refreshToken } = await issueRefreshToken(pool, authUser.id, clientMeta(req));
+  req.user = authUser;
+  await writeAudit(req, {
+    labId: authUser.labId,
+    action: "login",
+    detail: `Inicio de sesión · ${authUser.email} · ${authUser.role}`,
+  });
+  return {
+    status: "ok" as const,
+    token,
+    accessToken: token,
+    refreshToken,
+    user: authUser,
+  };
+}
+
+function mfaPublicFields(mailMocked: boolean, code: string) {
+  const payload: Record<string, unknown> = {
+    smtpPending: mailMocked,
+    mocked: mailMocked,
+    expiresInMinutes: mfaCodeTtlMinutes(),
+  };
+  if (mailMocked && process.env.NODE_ENV !== "production") {
+    payload.devMfaCode = code;
+  }
+  return payload;
+}
+
+async function startMfaChallenge(
+  req: Parameters<typeof writeAudit>[0],
+  user: {
+    id: string;
+    email: string;
+    name: string;
+    role: UserRole;
+    lab_id: string | null;
+  },
+) {
+  const pool = getPool();
+  const authUser = mapAuthUser(user);
+  req.user = authUser;
+  const code = generateMfaCode();
+  const { token } = await createChallenge(pool, {
+    userId: user.id,
+    kind: "mfa",
+    ttlMinutes: mfaCodeTtlMinutes(),
+    code,
+  });
+  const mail = await sendMfaCodeEmail({
+    to: user.email,
+    name: user.name,
+    code,
+    minutes: mfaCodeTtlMinutes(),
+  });
+  await writeAudit(req, {
+    labId: user.lab_id,
+    action: "login.mfa_sent",
+    detail: `${user.email} · código enviado${mail.mocked ? " (SMTP mock)" : ""}`,
+  });
+  return {
+    status: "mfa_required" as const,
+    mfaToken: token,
+    user: { email: user.email, name: user.name },
+    message: mail.mocked
+      ? "SMTP aún no está configurado. En desarrollo el código aparece en la respuesta y en el log del API."
+      : `Enviamos un código de 6 dígitos a ${user.email}.`,
+    ...mfaPublicFields(mail.mocked, code),
+  };
 }
 
 authRouter.post("/v1/auth/login", async (req, res) => {
@@ -90,7 +209,9 @@ authRouter.post("/v1/auth/login", async (req, res) => {
     const email = parsed.data.email.trim().toLowerCase();
     const pool = getPool();
     const result = await pool.query(
-      `SELECT id, email, name, password_hash, role, lab_id, active
+      `SELECT id, email, name, password_hash, role, lab_id, active,
+              COALESCE(must_change_password, false) AS must_change_password,
+              COALESCE(mfa_enabled, false) AS mfa_enabled
        FROM users WHERE lower(email) = $1 LIMIT 1`,
       [email],
     );
@@ -116,26 +237,205 @@ authRouter.post("/v1/auth/login", async (req, res) => {
       });
     }
 
-    const authUser = mapAuthUser(user);
-    const token = signAccessToken(authUser);
-    const { refreshToken } = await issueRefreshToken(pool, authUser.id, clientMeta(req));
+    if (user.must_change_password) {
+      const { token } = await createChallenge(pool, {
+        userId: user.id,
+        kind: "password_setup",
+        ttlMinutes: Number(process.env.PASSWORD_RESET_HOURS || 2) * 60,
+      });
+      return res.json({
+        status: "must_change_password",
+        setupToken: token,
+        user: { email: user.email, name: user.name },
+        message:
+          "Primer acceso: elige una contraseña nueva. Después se activará el código de 6 dígitos al correo.",
+      });
+    }
 
-    req.user = authUser;
-    await writeAudit(req, {
-      labId: authUser.labId,
-      action: "login",
-      detail: `Inicio de sesión · ${authUser.email} · ${authUser.role}`,
-    });
+    if (user.mfa_enabled) {
+      // Sin SMTP en producción no bloqueamos el acceso; el MFA se activa al configurar SMTP_*.
+      if (!smtpConfigured() && process.env.NODE_ENV === "production") {
+        return res.json(await issueFullSession(req, user));
+      }
+      return res.json(await startMfaChallenge(req, user));
+    }
 
-    return res.json({
-      token,
-      accessToken: token,
-      refreshToken,
-      user: authUser,
-    });
+    return res.json(await issueFullSession(req, user));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return res.status(500).json({ error: "login_failed", message });
+  }
+});
+
+authRouter.post("/v1/auth/complete-first-login", async (req, res) => {
+  const parsed = firstLoginBody.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: "invalid_body",
+      message: "La nueva contraseña debe tener al menos 8 caracteres.",
+      details: parsed.error.flatten(),
+    });
+  }
+
+  try {
+    const pool = getPool();
+    const challenge = await findOpenChallenge(
+      pool,
+      parsed.data.setupToken,
+      "password_setup",
+    );
+    if (!challenge) {
+      return res.status(400).json({
+        error: "invalid_setup_token",
+        message: "El enlace de primer acceso expiró. Inicia sesión de nuevo con la contraseña temporal.",
+      });
+    }
+
+    const user = await loadActiveUser(challenge.userId);
+    if (!user || !user.must_change_password) {
+      await consumeChallenge(pool, challenge.id);
+      return res.status(400).json({
+        error: "setup_not_required",
+        message: "Esta cuenta ya completó el primer acceso.",
+      });
+    }
+
+    const same = await bcrypt.compare(parsed.data.newPassword, user.password_hash);
+    if (same) {
+      return res.status(400).json({
+        error: "same_password",
+        message: "La nueva contraseña debe ser distinta a la temporal.",
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(parsed.data.newPassword, 10);
+    const enableMfa = user.role === "lab_admin";
+    await pool.query(
+      `UPDATE users
+       SET password_hash = $2,
+           must_change_password = false,
+           email_confirmed_at = now(),
+           mfa_enabled = $3,
+           password_changed_at = now()
+       WHERE id = $1`,
+      [user.id, passwordHash, enableMfa],
+    );
+    await consumeChallenge(pool, challenge.id);
+    await revokeAllRefreshTokens(pool, user.id);
+
+    req.user = mapAuthUser(user);
+    await writeAudit(req, {
+      labId: user.lab_id,
+      action: "password.first_change",
+      detail: enableMfa
+        ? `${user.email} · correo confirmado · MFA activado`
+        : `${user.email} · correo confirmado`,
+    });
+
+    return res.json({
+      ok: true,
+      mfaEnabled: enableMfa,
+      message: enableMfa
+        ? "Contraseña actualizada. Vuelve a iniciar sesión: te enviaremos un código de 6 dígitos a tu correo."
+        : "Contraseña actualizada. Ya puedes iniciar sesión.",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ error: "first_login_failed", message });
+  }
+});
+
+authRouter.post("/v1/auth/mfa/verify", async (req, res) => {
+  const parsed = mfaVerifyBody.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: "invalid_body",
+      message: "Ingresa el código de 6 dígitos.",
+      details: parsed.error.flatten(),
+    });
+  }
+
+  try {
+    const pool = getPool();
+    const challenge = await findOpenChallenge(pool, parsed.data.mfaToken, "mfa");
+    if (!challenge) {
+      return res.status(400).json({
+        error: "invalid_mfa_token",
+        message: "El código expiró. Inicia sesión de nuevo.",
+      });
+    }
+
+    if (challenge.attempts >= MFA_MAX_ATTEMPTS) {
+      await consumeChallenge(pool, challenge.id);
+      return res.status(401).json({
+        error: "mfa_locked",
+        message: "Demasiados intentos. Inicia sesión de nuevo para recibir otro código.",
+      });
+    }
+
+    if (!challenge.codeHash || challenge.codeHash !== mfaCodeHash(parsed.data.code)) {
+      const attempts = await bumpChallengeAttempts(pool, challenge.id);
+      if (attempts >= MFA_MAX_ATTEMPTS) {
+        await consumeChallenge(pool, challenge.id);
+        return res.status(401).json({
+          error: "mfa_locked",
+          message: "Demasiados intentos. Inicia sesión de nuevo para recibir otro código.",
+        });
+      }
+      return res.status(401).json({
+        error: "invalid_mfa_code",
+        message: "Código incorrecto.",
+        attemptsLeft: MFA_MAX_ATTEMPTS - attempts,
+      });
+    }
+
+    const user = await loadActiveUser(challenge.userId);
+    if (!user) {
+      await consumeChallenge(pool, challenge.id);
+      return res.status(401).json({ error: "invalid_mfa_token", message: "Usuario inactivo" });
+    }
+
+    await consumeChallenge(pool, challenge.id);
+    return res.json(await issueFullSession(req, user));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ error: "mfa_verify_failed", message });
+  }
+});
+
+authRouter.post("/v1/auth/mfa/resend", async (req, res) => {
+  const parsed = mfaResendBody.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
+  }
+
+  try {
+    const pool = getPool();
+    const challenge = await findOpenChallenge(pool, parsed.data.mfaToken, "mfa");
+    if (!challenge) {
+      return res.status(400).json({
+        error: "invalid_mfa_token",
+        message: "La sesión de verificación expiró. Inicia sesión de nuevo.",
+      });
+    }
+
+    const ageMs = Date.now() - (challenge.expiresAt.getTime() - mfaCodeTtlMinutes() * 60_000);
+    if (ageMs < 60_000) {
+      return res.status(429).json({
+        error: "mfa_resend_wait",
+        message: "Espera unos segundos antes de pedir otro código.",
+      });
+    }
+
+    const user = await loadActiveUser(challenge.userId);
+    if (!user) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    return res.json(await startMfaChallenge(req, user));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ error: "mfa_resend_failed", message });
   }
 });
 
@@ -161,6 +461,13 @@ authRouter.post("/v1/auth/refresh", async (req, res) => {
       return res.status(401).json({
         error: "invalid_refresh",
         message: "Usuario inactivo",
+      });
+    }
+    if (user.must_change_password) {
+      await revokeAllRefreshTokens(pool, rotated.userId);
+      return res.status(401).json({
+        error: "must_change_password",
+        message: "Debes cambiar la contraseña temporal antes de continuar.",
       });
     }
 
@@ -316,17 +623,10 @@ authRouter.post("/v1/auth/forgot-password", async (req, res) => {
     );
 
     const resetUrl = `${appPublicUrl().replace(/\/$/, "")}/reset-password/?token=${encodeURIComponent(rawToken)}`;
-    const mail = await sendMail({
+    const mail = await sendPasswordResetEmail({
       to: user.email,
-      subject: "Restablecer contraseña — NutriLab",
-      text: [
-        `Hola ${user.name},`,
-        ``,
-        `Usa este enlace para restablecer tu contraseña (válido unas horas):`,
-        resetUrl,
-        ``,
-        `Si no pediste este cambio, ignora este correo.`,
-      ].join("\n"),
+      name: user.name,
+      resetUrl,
     });
 
     const payload: Record<string, unknown> = {

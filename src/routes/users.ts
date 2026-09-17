@@ -1,11 +1,11 @@
-import { randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { Router } from "express";
 import { z } from "zod";
 import { getPool } from "../db/pool.js";
 import { writeAudit } from "../lib/audit.js";
-import { appPublicUrl, sendMail } from "../lib/mailer.js";
+import { sendInviteEmail } from "../lib/auth-emails.js";
 import { resolveLabId } from "../lib/mappers.js";
+import { generateTempPassword } from "../lib/passwords.js";
 import { getLabCapacity } from "../lib/quota.js";
 import { requireAuth, requireWrite } from "../middleware/auth.js";
 
@@ -40,10 +40,6 @@ function mapLabUser(row: Record<string, unknown>) {
         ? row.created_at.toISOString()
         : String(row.created_at ?? ""),
   };
-}
-
-function generateTempPassword() {
-  return randomBytes(5).toString("base64url").slice(0, 10);
 }
 
 async function countActiveAdmins(labId: string, excludeUserId?: string) {
@@ -138,22 +134,10 @@ usersRouter.post("/v1/lab/users", requireAuth, requireWrite, async (req, res) =>
         detail: `${user.email} · ${user.role}`,
       });
 
-      const loginUrl = `${appPublicUrl().replace(/\/$/, "")}/login/`;
-      const mail = await sendMail({
+      const mail = await sendInviteEmail({
         to: user.email,
-        subject: "Invitación a NutriLab — Enerxis",
-        text: [
-          `Hola ${user.name},`,
-          ``,
-          `Te invitaron a NutriLab.`,
-          `Accede en: ${loginUrl}`,
-          `Email: ${user.email}`,
-          data.password
-            ? `Usa la contraseña que te indicaron.`
-            : `Contraseña temporal: ${tempPassword}`,
-          ``,
-          `Te recomendamos cambiarla al entrar (Cuenta → Cambiar contraseña).`,
-        ].join("\n"),
+        name: user.name,
+        tempPassword: data.password ? undefined : tempPassword,
       });
 
       return res.status(201).json({

@@ -1,0 +1,68 @@
+# Ejecuta migrate + import Excel (ICBF + base Enerxis) en el VPS de producción.
+# GitHub → Actions → "Import catalog (production)" → Run workflow
+#
+# Secrets requeridos en este repo (Settings → Secrets):
+#   SSH_HOST      → ej. 193.203.182.13
+#   SSH_USER      → ej. root
+#   SSH_PASSWORD  → contraseña SSH del VPS
+#   SSH_PORT      → opcional (default 22)
+#   NUTRI_API_PATH → opcional (default /var/www/html/nutri-api)
+
+name: Import catalog (production)
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_icbf:
+        description: "No importar BD_ICBF.xlsx"
+        type: boolean
+        default: false
+      skip_base:
+        description: "No importar BASE_ENERXIS_INGREDIENTES.xlsx"
+        type: boolean
+        default: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Migrate + import on VPS
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+          API_PATH: ${{ secrets.NUTRI_API_PATH || '/var/www/html/nutri-api' }}
+          SKIP_ICBF: ${{ inputs.skip_icbf && '1' || '0' }}
+          SKIP_BASE: ${{ inputs.skip_base && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_HOST:-}" ] || [ -z "${SSH_USER:-}" ] || [ -z "${SSH_PASSWORD:-}" ]; then
+            echo "::error::Faltan secrets SSH_HOST, SSH_USER, SSH_PASSWORD en el repo nutri-api"
+            exit 1
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass openssh-client
+          export SSHPASS="$SSH_PASSWORD"
+          sshpass -e ssh -o StrictHostKeyChecking=no -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "API_PATH='$API_PATH' SKIP_ICBF='$SKIP_ICBF' SKIP_BASE='$SKIP_BASE' bash -s" << 'REMOTE'
+          set -euo pipefail
+          cd "$API_PATH"
+          echo "=== git ==="
+          git fetch origin
+          git reset --hard origin/main
+          git log -1 --oneline
+          echo "=== npm ==="
+          npm ci
+          echo "=== migrate ==="
+          npm run db:migrate
+          echo "=== import catalog ==="
+          export SKIP_ICBF_IMPORT="$SKIP_ICBF"
+          export SKIP_BASE_IMPORT="$SKIP_BASE"
+          npm run db:import-catalog
+          echo "=== counts ==="
+          DB_URL=$(grep '^DATABASE_URL=' .env | cut -d= -f2- | tr -d '"')
+          psql "$DB_URL" -c "SELECT count(*) AS base_enerxis FROM ingredients WHERE is_base = true;"
+          psql "$DB_URL" -c "SELECT count(*) AS icbf_foods FROM icbf_foods;"
+          REMOTE

@@ -1,5 +1,7 @@
 # Deploy (VPS / producción)
 
+**AWS (EC2 + Amplify):** guía paso a paso en [docs/AWS-EC2-AMPLIFY.md](./docs/AWS-EC2-AMPLIFY.md) — push a `main` en cada repo despliega solo.
+
 ## Variables
 
 El migrator y la API leen `DATABASE_URL` desde `.env` en la raíz del repo (no versionado).

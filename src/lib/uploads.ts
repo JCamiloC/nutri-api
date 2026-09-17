@@ -55,3 +55,50 @@ export function removeLabLogoFiles(labId: string) {
     }
   }
 }
+
+export function libraryDir(): string {
+  return path.join(uploadsRoot(), "library");
+}
+
+export function ensureLibraryDir() {
+  fs.mkdirSync(libraryDir(), { recursive: true });
+}
+
+export function libraryFilePath(storedName: string): string {
+  return path.join(libraryDir(), storedName);
+}
+
+export function platformDir(): string {
+  return path.join(uploadsRoot(), "platform");
+}
+
+export function ensurePlatformDir() {
+  fs.mkdirSync(platformDir(), { recursive: true });
+}
+
+export function platformLogoPath(ext: string): string {
+  return path.join(platformDir(), `logo.${ext}`);
+}
+
+export function platformLogoPublicPath(ext: string | null | undefined): string | null {
+  if (!ext) return null;
+  return `/uploads/platform/logo.${ext}`;
+}
+
+export function removePlatformLogoFiles() {
+  const dir = platformDir();
+  if (!fs.existsSync(dir)) return;
+  for (const file of fs.readdirSync(dir)) {
+    if (file.startsWith("logo.")) {
+      fs.unlinkSync(path.join(dir, file));
+    }
+  }
+}
+
+export function safeUnlink(filePath: string) {
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  } catch {
+    /* ignore */
+  }
+}

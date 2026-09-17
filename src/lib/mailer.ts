@@ -14,7 +14,23 @@ export type SendMailInput = {
   text: string;
   html?: string;
   replyTo?: string;
+  fromName?: string;
 };
+
+function smtpFromAddress(): string {
+  const raw = process.env.SMTP_FROM?.trim() || process.env.SMTP_USER || "";
+  const match = /<([^>]+)>/.exec(raw);
+  if (match) return match[1].trim();
+  if (raw.includes("@")) return raw.replace(/^"|"$/g, "").trim();
+  return raw;
+}
+
+function smtpFromHeader(fromName?: string): string {
+  const address = smtpFromAddress();
+  const name = fromName?.trim();
+  if (name && address) return `"${name.replace(/"/g, "")}" <${address}>`;
+  return process.env.SMTP_FROM?.trim() || process.env.SMTP_USER || address;
+}
 
 export type SendMailResult = {
   ok: true;
@@ -31,7 +47,7 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
     return { ok: true, mocked: true };
   }
 
-  const from = process.env.SMTP_FROM?.trim() || process.env.SMTP_USER!;
+  const from = smtpFromHeader(input.fromName);
   const port = Number(process.env.SMTP_PORT || 587);
   const secure = process.env.SMTP_SECURE === "true" || port === 465;
 

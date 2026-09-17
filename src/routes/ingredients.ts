@@ -8,6 +8,10 @@ import {
   isIngredientEditable,
   viewerFromReq,
 } from "../lib/ingredient-ownership.js";
+import {
+  allocateIngredientCode,
+  peekIngredientCode,
+} from "../lib/ingredient-code.js";
 import { mapIngredient, resolveLabId } from "../lib/mappers.js";
 import { requireAuth, requireWrite } from "../middleware/auth.js";
 
@@ -74,6 +78,18 @@ ingredientsRouter.get("/v1/ingredients", requireAuth, async (req, res) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return res.status(500).json({ error: "list_ingredients_failed", message });
+  }
+});
+
+ingredientsRouter.get("/v1/ingredients/next-code", requireAuth, async (req, res) => {
+  try {
+    const labId = getLabId(req, res);
+    if (!labId) return;
+    const codigo = await peekIngredientCode(getPool(), labId);
+    return res.json({ codigo });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ error: "next_code_failed", message });
   }
 });
 
@@ -145,7 +161,9 @@ ingredientsRouter.post("/v1/ingredients", requireAuth, requireWrite, async (req,
   const readOnly = false;
 
   try {
-    const result = await getPool().query(
+    const pool = getPool();
+    const codigo = await allocateIngredientCode(pool, labId);
+    const result = await pool.query(
       `INSERT INTO ingredients (
         lab_id, source, referencia, nombre, read_only, is_base, created_by_user_id,
         tipo, estado, unidad_medida, costo, proveedor, parte_analizada, humedad,
@@ -164,14 +182,14 @@ ingredientsRouter.post("/v1/ingredients", requireAuth, requireWrite, async (req,
       [
         labId,
         source,
-        d.referencia ?? null,
+        codigo,
         d.nombre,
         readOnly,
         viewer.id,
         d.tipo ?? "MATERIA PRIMA",
         d.estado ?? "POLVO",
         d.unidadMedida ?? "g",
-        d.costo ?? 0,
+        0,
         d.proveedor ?? null,
         d.parteAnalizada ?? null,
         d.humedad ?? null,
@@ -232,7 +250,9 @@ ingredientsRouter.post(
       const baseName = String(src.nombre ?? "Ingrediente");
       const copyName = `${baseName} (copia)`;
 
-      const result = await getPool().query(
+      const pool = getPool();
+      const codigo = await allocateIngredientCode(pool, labId);
+      const result = await pool.query(
         `INSERT INTO ingredients (
           lab_id, source, referencia, nombre, read_only, is_base,
           created_by_user_id, copied_from_id,
@@ -243,16 +263,16 @@ ingredientsRouter.post(
           vitaminas, alergenos, aminoacidos
         )
         SELECT
-          $1, 'BD', referencia, $2, false, false,
+          $1, 'BD', $5, $2, false, false,
           $3, id,
-          tipo, estado, unidad_medida, costo, proveedor, parte_analizada, humedad,
+          tipo, estado, unidad_medida, 0, proveedor, parte_analizada, humedad,
           grasas, grasa_saturada, grasa_mono, grasa_poli, grasa_trans,
           colesterol, sodio, potasio, carbohidratos, fibra, fibra_sol, fibra_insol,
           polialcoholes, azucar, azucar_add, proteina, energia_kcal,
           vitaminas, alergenos, aminoacidos
         FROM ingredients WHERE id = $4
         RETURNING *`,
-        [labId, copyName, viewer.id, src.id],
+        [labId, copyName, viewer.id, src.id, codigo],
       );
 
       await writeAudit(req, {
@@ -312,44 +332,40 @@ ingredientsRouter.patch("/v1/ingredients/:id", requireAuth, requireWrite, async 
     const result = await getPool().query(
       `UPDATE ingredients SET
         nombre = COALESCE($2, nombre),
-        referencia = COALESCE($3, referencia),
-        tipo = COALESCE($4, tipo),
-        estado = COALESCE($5, estado),
-        unidad_medida = COALESCE($6, unidad_medida),
-        costo = COALESCE($7, costo),
-        proveedor = COALESCE($8, proveedor),
-        parte_analizada = COALESCE($9, parte_analizada),
-        humedad = COALESCE($10, humedad),
-        grasas = COALESCE($11, grasas),
-        grasa_saturada = COALESCE($12, grasa_saturada),
-        grasa_mono = COALESCE($13, grasa_mono),
-        grasa_poli = COALESCE($14, grasa_poli),
-        grasa_trans = COALESCE($15, grasa_trans),
-        colesterol = COALESCE($16, colesterol),
-        sodio = COALESCE($17, sodio),
-        potasio = COALESCE($18, potasio),
-        carbohidratos = COALESCE($19, carbohidratos),
-        fibra = COALESCE($20, fibra),
-        fibra_sol = COALESCE($21, fibra_sol),
-        fibra_insol = COALESCE($22, fibra_insol),
-        polialcoholes = COALESCE($23, polialcoholes),
-        azucar = COALESCE($24, azucar),
-        azucar_add = COALESCE($25, azucar_add),
-        proteina = COALESCE($26, proteina),
-        energia_kcal = COALESCE($27, energia_kcal),
-        vitaminas = COALESCE($28::jsonb, vitaminas),
-        alergenos = COALESCE($29::jsonb, alergenos),
+        tipo = COALESCE($3, tipo),
+        estado = COALESCE($4, estado),
+        unidad_medida = COALESCE($5, unidad_medida),
+        proveedor = COALESCE($6, proveedor),
+        parte_analizada = COALESCE($7, parte_analizada),
+        humedad = COALESCE($8, humedad),
+        grasas = COALESCE($9, grasas),
+        grasa_saturada = COALESCE($10, grasa_saturada),
+        grasa_mono = COALESCE($11, grasa_mono),
+        grasa_poli = COALESCE($12, grasa_poli),
+        grasa_trans = COALESCE($13, grasa_trans),
+        colesterol = COALESCE($14, colesterol),
+        sodio = COALESCE($15, sodio),
+        potasio = COALESCE($16, potasio),
+        carbohidratos = COALESCE($17, carbohidratos),
+        fibra = COALESCE($18, fibra),
+        fibra_sol = COALESCE($19, fibra_sol),
+        fibra_insol = COALESCE($20, fibra_insol),
+        polialcoholes = COALESCE($21, polialcoholes),
+        azucar = COALESCE($22, azucar),
+        azucar_add = COALESCE($23, azucar_add),
+        proteina = COALESCE($24, proteina),
+        energia_kcal = COALESCE($25, energia_kcal),
+        vitaminas = COALESCE($26::jsonb, vitaminas),
+        alergenos = COALESCE($27::jsonb, alergenos),
         updated_at = now()
       WHERE id = $1
       RETURNING *`,
       [
         req.params.id,
         d.nombre ?? null,
-        d.referencia === undefined ? null : d.referencia,
         d.tipo ?? null,
         d.estado ?? null,
         d.unidadMedida ?? null,
-        d.costo ?? null,
         d.proveedor === undefined ? null : d.proveedor,
         d.parteAnalizada === undefined ? null : d.parteAnalizada,
         d.humedad === undefined ? null : d.humedad,

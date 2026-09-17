@@ -1,0 +1,42 @@
+# Push a main → SSH a EC2 → scripts/ec2-deploy.sh (migrate + restart).
+#
+# Secrets en GitHub (repo nutri-api → Settings → Secrets → Actions):
+#   EC2_HOST        IP elástica o DNS del API
+#   EC2_USER        ubuntu
+#   EC2_SSH_KEY     contenido del .pem (clave privada)
+#   EC2_PATH        opcional, default /opt/nutri-api
+
+name: Deploy API to EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-ec2-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Deploy over SSH
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+          KEY: ${{ secrets.EC2_SSH_KEY }}
+          APP_PATH: ${{ secrets.EC2_PATH }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HOST:-}" ] || [ -z "${USER:-}" ] || [ -z "${KEY:-}" ]; then
+            echo "::error::Faltan secrets EC2_HOST, EC2_USER, EC2_SSH_KEY en el repo nutri-api"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/ec2.pem
+          chmod 600 ~/.ssh/ec2.pem
+          PATH_ARG="${APP_PATH:-/opt/nutri-api}"
+          ssh -i ~/.ssh/ec2.pem -o StrictHostKeyChecking=accept-new \
+            "$USER@$HOST" "NUTRI_API_PATH='$PATH_ARG' bash '$PATH_ARG/scripts/ec2-deploy.sh'"

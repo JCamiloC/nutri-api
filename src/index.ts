@@ -28,7 +28,7 @@ app.use(
     },
   }),
 );
-app.use(express.json({ limit: "3mb" }));
+app.use(express.json({ limit: "25mb" }));
 app.use("/uploads", express.static(uploadsRoot()));
 app.use(router);
 

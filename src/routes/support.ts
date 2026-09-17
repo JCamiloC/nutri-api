@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { writeAudit } from "../lib/audit.js";
+import { loadPlatformBranding } from "../lib/platform-branding.js";
 import { sendMail, smtpConfigured } from "../lib/mailer.js";
 import { resolveLabId } from "../lib/mappers.js";
 import { requireAuth } from "../middleware/auth.js";
@@ -32,10 +33,12 @@ supportRouter.post("/v1/support/tickets", requireAuth, async (req, res) => {
     }
 
     const { subject, message } = parsed.data;
-    const supportTo = process.env.SUPPORT_EMAIL?.trim() || "soporte@enerxis.com";
-    const mailSubject = `[NutriLab] ${subject}`;
+    const branding = await loadPlatformBranding();
+    const supportTo =
+      branding.supportEmail || process.env.SUPPORT_EMAIL?.trim() || "soporte@enerxis.com";
+    const mailSubject = `[${branding.productName}] ${subject}`;
     const body = [
-      `Ticket de mesa de ayuda — Enerxis NutriLab`,
+      `Ticket de mesa de ayuda — ${branding.companyName} ${branding.productName}`,
       ``,
       `De: ${user.name} <${user.email}>`,
       `Rol: ${user.role}`,
