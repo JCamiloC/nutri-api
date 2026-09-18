@@ -8,6 +8,7 @@ import {
   loadPlatformBranding,
   mapPlatformRow,
   publicBrandingPayload,
+  type PlatformBrandingDraft,
 } from "../lib/platform-branding.js";
 import {
   ensurePlatformDir,
@@ -217,7 +218,8 @@ platformRouter.post("/v1/platform/email-preview", requireAuth, requireSuperadmin
   }
   const kind = parsed.data.kind ?? "welcome";
   try {
-    const preview = await renderEmailPreview(kind, parsed.data.draft);
+    const draft = parsed.data.draft as PlatformBrandingDraft | undefined;
+    const preview = await renderEmailPreview(kind, draft);
     return res.json({
       kind,
       subject: preview.subject,

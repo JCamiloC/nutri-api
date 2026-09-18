@@ -52,6 +52,9 @@ const DEFAULTS: Omit<PlatformBranding, "logoUrl" | "logoAbsoluteUrl" | "logoExt"
   emailFromName: "NutriLab",
   emailFooter: null,
   welcomeIntro: null,
+  mfaIntro: null,
+  inviteIntro: null,
+  resetIntro: null,
 };
 
 export function apiPublicUrl(): string {
