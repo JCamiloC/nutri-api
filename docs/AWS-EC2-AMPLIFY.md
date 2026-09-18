@@ -188,8 +188,9 @@ Push a `main` con el workflow `deploy-ec2.yml` en el repo → Actions debe corre
    | `NEXT_PUBLIC_API_URL` | `https://api.tudominio.com` |
 
 5. **Save and deploy**
-6. **Rewrites:** no uses catch-all `/* → /index.html` (Next export ya genera rutas con `/index.html`).
-7. **Custom domain** (opcional): `app.tudominio.com` → Amplify te da CNAME.
+6. **Marco Next.js / plataforma WEB_COMPUTE:** con `output: "export"` en `next.config.ts`, el build genera **dos** carpetas: `out/` (HTML estático) y `.next/` (incluye `required-server-files.json`). El `amplify.yml` del repo publica **`.next`**, no `out`. Si `baseDirectory` es `out`, el deploy falla con `Can't find required-server-files.json`.
+7. **Rewrites:** en hosting estático clásico no uses catch-all `/* → /index.html`; con compute Next.js Amplify enruta solo.
+8. **Custom domain** (opcional): `app.tudominio.com` → Amplify te da CNAME.
 
 Cada **push a `main`** en nutri-saas → Amplify rebuild y publica solo.
 
