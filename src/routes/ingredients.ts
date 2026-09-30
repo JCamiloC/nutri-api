@@ -142,10 +142,31 @@ const createBody = z.object({
   energiaKcal: z.number().optional(),
   vitaminas: z.array(z.object({ nombre: z.string(), valor: z.number() })).optional(),
   alergenos: z.record(z.unknown()).optional(),
+  containsSweetener: z.boolean(),
+  isAdditive: z.boolean().optional().default(false),
+  technologicalFunction: z.string().optional().nullable(),
 });
 
+const ingredientBodyRefine = (
+  data: {
+    isAdditive?: boolean;
+    technologicalFunction?: string | null;
+  },
+  ctx: z.RefinementCtx,
+) => {
+  if (data.isAdditive && !String(data.technologicalFunction ?? "").trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "technological_function_required",
+      path: ["technologicalFunction"],
+    });
+  }
+};
+
+const createBodyStrict = createBody.superRefine(ingredientBodyRefine);
+
 ingredientsRouter.post("/v1/ingredients", requireAuth, requireWrite, async (req, res) => {
-  const parsed = createBody.safeParse(req.body);
+  const parsed = createBodyStrict.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() });
   }
@@ -170,14 +191,16 @@ ingredientsRouter.post("/v1/ingredients", requireAuth, requireWrite, async (req,
         grasas, grasa_saturada, grasa_mono, grasa_poli, grasa_trans,
         colesterol, sodio, potasio, carbohidratos, fibra, fibra_sol, fibra_insol,
         polialcoholes, azucar, azucar_add, proteina, energia_kcal,
-        vitaminas, alergenos
+        vitaminas, alergenos,
+        contains_sweetener, is_additive, technological_function
       ) VALUES (
         $1,$2,$3,$4,$5,false,$6,
         $7,$8,$9,$10,$11,$12,$13,
         $14,$15,$16,$17,$18,
         $19,$20,$21,$22,$23,$24,$25,
         $26,$27,$28,$29,$30,
-        $31::jsonb,$32::jsonb
+        $31::jsonb,$32::jsonb,
+        $33,$34,$35
       ) RETURNING *`,
       [
         labId,
@@ -212,6 +235,9 @@ ingredientsRouter.post("/v1/ingredients", requireAuth, requireWrite, async (req,
         d.energiaKcal ?? 0,
         JSON.stringify(d.vitaminas ?? []),
         JSON.stringify(d.alergenos ?? {}),
+        d.containsSweetener,
+        d.isAdditive ?? false,
+        d.isAdditive ? (d.technologicalFunction?.trim() || null) : null,
       ],
     );
 
@@ -260,7 +286,8 @@ ingredientsRouter.post(
           grasas, grasa_saturada, grasa_mono, grasa_poli, grasa_trans,
           colesterol, sodio, potasio, carbohidratos, fibra, fibra_sol, fibra_insol,
           polialcoholes, azucar, azucar_add, proteina, energia_kcal,
-          vitaminas, alergenos, aminoacidos
+          vitaminas, alergenos, aminoacidos,
+          contains_sweetener, is_additive, technological_function
         )
         SELECT
           $1, 'BD', $5, $2, false, false,
@@ -269,7 +296,8 @@ ingredientsRouter.post(
           grasas, grasa_saturada, grasa_mono, grasa_poli, grasa_trans,
           colesterol, sodio, potasio, carbohidratos, fibra, fibra_sol, fibra_insol,
           polialcoholes, azucar, azucar_add, proteina, energia_kcal,
-          vitaminas, alergenos, aminoacidos
+          vitaminas, alergenos, aminoacidos,
+          contains_sweetener, is_additive, technological_function
         FROM ingredients WHERE id = $4
         RETURNING *`,
         [labId, copyName, viewer.id, src.id, codigo],
@@ -289,9 +317,13 @@ ingredientsRouter.post(
   },
 );
 
-const updateBody = createBody.omit({ source: true }).partial().extend({
-  nombre: z.string().min(1).optional(),
-});
+const updateBody = createBody
+  .omit({ source: true })
+  .partial()
+  .extend({
+    nombre: z.string().min(1).optional(),
+  })
+  .superRefine(ingredientBodyRefine);
 
 ingredientsRouter.patch("/v1/ingredients/:id", requireAuth, requireWrite, async (req, res) => {
   const parsed = updateBody.safeParse(req.body);
@@ -357,6 +389,13 @@ ingredientsRouter.patch("/v1/ingredients/:id", requireAuth, requireWrite, async 
         energia_kcal = COALESCE($25, energia_kcal),
         vitaminas = COALESCE($26::jsonb, vitaminas),
         alergenos = COALESCE($27::jsonb, alergenos),
+        contains_sweetener = COALESCE($28, contains_sweetener),
+        is_additive = COALESCE($29, is_additive),
+        technological_function = CASE
+          WHEN $29 IS NOT NULL AND $29 = false THEN NULL
+          WHEN $30 IS NOT NULL THEN $30
+          ELSE technological_function
+        END,
         updated_at = now()
       WHERE id = $1
       RETURNING *`,
@@ -388,6 +427,13 @@ ingredientsRouter.patch("/v1/ingredients/:id", requireAuth, requireWrite, async 
         d.energiaKcal ?? null,
         d.vitaminas ? JSON.stringify(d.vitaminas) : null,
         d.alergenos ? JSON.stringify(d.alergenos) : null,
+        d.containsSweetener ?? null,
+        d.isAdditive ?? null,
+        d.isAdditive === false
+          ? null
+          : d.technologicalFunction === undefined
+            ? null
+            : d.technologicalFunction?.trim() || null,
       ],
     );
 

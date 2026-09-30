@@ -1,0 +1,2 @@
+-- Empaque secundario opcional: meta.hasSecondaryPackaging = true → 8 tablas (4 + 4 con leyenda 1 unidad).
+-- Compat: packagingPrimary en meta se interpreta igual que hasSecondaryPackaging.

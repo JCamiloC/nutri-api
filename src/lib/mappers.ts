@@ -53,6 +53,9 @@ export function mapFormula(row: Record<string, unknown>) {
           tabular: (rawTables as Record<string, unknown>).tabular !== false,
         }
       : null;
+  const hasSecondaryPackaging =
+    meta.hasSecondaryPackaging === true ||
+    meta.packagingPrimary === true;
   const sweetRaw = row.sweetener;
   const containsSweetener =
     sweetRaw === true ||
@@ -85,6 +88,7 @@ export function mapFormula(row: Record<string, unknown>) {
     storageMode: (row.storage_mode as string | null) ?? null,
     manufacturedBy: row.manufactured_by,
     manufacturedFor: row.manufactured_for,
+    manufacturerProfileId: (row.manufacturer_profile_id as string | null) ?? null,
     sealOverrides: sealOverrides
       ? {
           azucar: sealOverrides.azucar === true,
@@ -100,6 +104,7 @@ export function mapFormula(row: Record<string, unknown>) {
       typeof meta.ingredientListText === "string" ? meta.ingredientListText : null,
     allergenListText:
       typeof meta.allergenListText === "string" ? meta.allergenListText : null,
+    hasSecondaryPackaging,
     meta,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -137,6 +142,10 @@ export function mapIngredient(
     costo: Number(row.costo),
     estado: row.estado,
     proveedor: row.proveedor,
+    containsSweetener: row.contains_sweetener === true,
+    isAdditive: row.is_additive === true,
+    technologicalFunction:
+      row.technological_function != null ? String(row.technological_function) : null,
     tipo: row.tipo,
     readOnly: !editable,
     isBase: row.is_base === true,

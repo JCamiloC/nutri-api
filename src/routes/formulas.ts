@@ -10,7 +10,11 @@ import {
   mapFormulaVersion,
   type VersionSnapshot,
 } from "../lib/formula-versions.js";
-import { canResolveIngredientForFormula } from "../lib/ingredient-ownership.js";
+import {
+  canResolveIngredientForFormula,
+  ownershipKind,
+  viewerFromReq,
+} from "../lib/ingredient-ownership.js";
 import { ingredientToPer100g } from "../lib/ingredient-profile.js";
 import { mapFormula, mapFormulaLine, resolveLabId } from "../lib/mappers.js";
 import { getLabCapacity } from "../lib/quota.js";
@@ -45,18 +49,29 @@ async function loadLabBranding(
   labId: string,
   req: { protocol: string; get: (h: string) => string | undefined },
 ) {
-  const lab = await getPool().query(`SELECT * FROM labs WHERE id = $1`, [labId]);
+  const pool = getPool();
+  const lab = await pool.query(`SELECT * FROM labs WHERE id = $1`, [labId]);
   const row = lab.rows[0];
   if (!row) return null;
   const logoPath = labLogoPublicPath(labId, row.logo_ext as string | null);
   const host = req.get("host");
   const base = host ? `${req.protocol}://${host}` : "";
+  const { listManufacturerProfiles } = await import("../lib/lab-manufacturers.js");
+  const manufacturerProfiles = await listManufacturerProfiles(pool, labId);
+  const defaultProfile =
+    manufacturerProfiles.find((p) => p.isDefault) ?? manufacturerProfiles[0] ?? null;
   return {
     name: row.name as string,
     logoUrl: logoPath ? `${base}${logoPath}` : null,
     watermarkDefault: row.watermark_default !== false,
-    manufacturedByDefault: (row.manufactured_by_default as string | null) ?? null,
-    manufacturedForDefault: (row.manufactured_for_default as string | null) ?? null,
+    usageModeDefault: (row.usage_mode_default as string | null) ?? null,
+    manufacturerProfiles,
+    manufacturedByDefault:
+      defaultProfile?.manufacturedBy ??
+      ((row.manufactured_by_default as string | null) ?? null),
+    manufacturedForDefault:
+      defaultProfile?.manufacturedFor ??
+      ((row.manufactured_for_default as string | null) ?? null),
   };
 }
 
@@ -109,9 +124,41 @@ formulasRouter.get("/v1/formulas/:id", requireAuth, async (req, res) => {
       [req.params.id],
     );
 
+    const viewer = viewerFromReq(req);
+    const ingredientIds = [
+      ...new Set(
+        lines.rows
+          .map((r) => r.ingredient_id)
+          .filter((id): id is string => typeof id === "string" && id.length > 0),
+      ),
+    ];
+    const ownershipByIngredient = new Map<
+      string,
+      { ownership: "verified" | "mine" | "other"; isBase: boolean }
+    >();
+    if (ingredientIds.length > 0) {
+      const ingRes = await pool.query(
+        `SELECT id, source, is_base, lab_id, created_by_user_id FROM ingredients WHERE id = ANY($1::uuid[])`,
+        [ingredientIds],
+      );
+      for (const row of ingRes.rows) {
+        ownershipByIngredient.set(String(row.id), {
+          ownership: ownershipKind(row, viewer),
+          isBase: row.is_base === true,
+        });
+      }
+    }
+
     return res.json({
       ...mapFormula(formula.rows[0]),
-      lines: lines.rows.map(mapFormulaLine),
+      lines: lines.rows.map((row) => {
+        const mapped = mapFormulaLine(row);
+        const ingId = row.ingredient_id ? String(row.ingredient_id) : null;
+        const own = ingId ? ownershipByIngredient.get(ingId) : undefined;
+        return own
+          ? { ...mapped, ownership: own.ownership, isBase: own.isBase }
+          : mapped;
+      }),
       labBranding: await loadLabBranding(labId, req),
     });
   } catch (error) {
@@ -162,11 +209,13 @@ const createBody = z.object({
   storageMode: z.string().optional().nullable(),
   manufacturedBy: z.string().optional().nullable(),
   manufacturedFor: z.string().optional().nullable(),
+  manufacturerProfileId: z.string().uuid().optional().nullable(),
   sealOverrides: sealOverridesSchema,
   nutrientToggles: z.record(z.boolean()).optional().nullable(),
   tableFormats: tableFormatsSchema,
   ingredientListText: z.string().optional().nullable(),
   allergenListText: z.string().optional().nullable(),
+  hasSecondaryPackaging: z.boolean().optional(),
   lines: z
     .array(
       z.object({
@@ -224,11 +273,43 @@ formulasRouter.post("/v1/formulas", requireAuth, requireWrite, async (req, res) 
     await client.query("BEGIN");
 
     const labMeta = await client.query(
-      `SELECT watermark_default, manufactured_by_default, manufactured_for_default
+      `SELECT watermark_default, manufactured_by_default, manufactured_for_default, usage_mode_default
        FROM labs WHERE id = $1`,
       [labId],
     );
     const lab = labMeta.rows[0] ?? {};
+
+    let manufacturerProfileId = data.manufacturerProfileId ?? null;
+    let manufacturedBy = data.manufacturedBy ?? null;
+    let manufacturedFor = data.manufacturedFor ?? null;
+    if (manufacturerProfileId) {
+      const prof = await client.query(
+        `SELECT manufactured_by, manufactured_for FROM lab_manufacturer_profiles
+         WHERE id = $1 AND lab_id = $2`,
+        [manufacturerProfileId, labId],
+      );
+      if (!prof.rows[0]) {
+        manufacturerProfileId = null;
+      } else {
+        manufacturedBy = manufacturedBy ?? prof.rows[0].manufactured_by;
+        manufacturedFor = manufacturedFor ?? prof.rows[0].manufactured_for;
+      }
+    }
+    if (!manufacturedBy && !manufacturedFor && !manufacturerProfileId) {
+      const def = await client.query(
+        `SELECT id, manufactured_by, manufactured_for FROM lab_manufacturer_profiles
+         WHERE lab_id = $1 ORDER BY is_default DESC, sort_order ASC, created_at ASC LIMIT 1`,
+        [labId],
+      );
+      if (def.rows[0]) {
+        manufacturerProfileId = def.rows[0].id;
+        manufacturedBy = def.rows[0].manufactured_by;
+        manufacturedFor = def.rows[0].manufactured_for;
+      } else {
+        manufacturedBy = manufacturedBy ?? lab.manufactured_by_default ?? null;
+        manufacturedFor = manufacturedFor ?? lab.manufactured_for_default ?? null;
+      }
+    }
 
     const insert = await client.query(
       `INSERT INTO formulas (
@@ -236,8 +317,8 @@ formulasRouter.post("/v1/formulas", requireAuth, requireWrite, async (req, res) 
         package_weight, weight_unit, servings, serving_size,
         reconstituted_serving, water_per_serving, formula_type, ingredient_count,
         show_logo, show_watermark, sweetener, rsa, flavor, usage_mode, storage_mode,
-        manufactured_by, manufactured_for, meta
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb)
+        manufactured_by, manufactured_for, manufacturer_profile_id, meta
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24::jsonb)
       RETURNING *`,
       [
         labId,
@@ -258,10 +339,11 @@ formulasRouter.post("/v1/formulas", requireAuth, requireWrite, async (req, res) 
         data.containsSweetener ? "1" : null,
         data.rsa?.trim() || null,
         data.flavor?.trim() || null,
-        data.usageMode?.trim() || null,
+        data.usageMode?.trim() || (lab.usage_mode_default as string | null) || null,
         data.storageMode?.trim() || null,
-        data.manufacturedBy ?? lab.manufactured_by_default ?? null,
-        data.manufacturedFor ?? lab.manufactured_for_default ?? null,
+        manufacturedBy,
+        manufacturedFor,
+        manufacturerProfileId,
         JSON.stringify({
           ...(data.sealOverrides ? { sealOverrides: data.sealOverrides } : {}),
           ...(data.nutrientToggles ? { nutrientToggles: data.nutrientToggles } : {}),
@@ -409,7 +491,8 @@ formulasRouter.patch("/v1/formulas/:id", requireAuth, requireWrite, async (req, 
       d.nutrientToggles !== undefined ||
       d.tableFormats !== undefined ||
       d.ingredientListText !== undefined ||
-      d.allergenListText !== undefined;
+      d.allergenListText !== undefined ||
+      d.hasSecondaryPackaging !== undefined;
     const nextMeta = labelMetaTouched
       ? {
           ...existingMeta,
@@ -428,8 +511,42 @@ formulasRouter.patch("/v1/formulas/:id", requireAuth, requireWrite, async (req, 
           ...(d.allergenListText !== undefined
             ? { allergenListText: d.allergenListText }
             : {}),
+          ...(d.hasSecondaryPackaging !== undefined
+            ? { hasSecondaryPackaging: d.hasSecondaryPackaging }
+            : {}),
         }
       : existingMeta;
+
+    let nextManufacturerProfileId = existing.rows[0].manufacturer_profile_id as string | null;
+    let nextManufacturedBy = existing.rows[0].manufactured_by as string | null;
+    let nextManufacturedFor = existing.rows[0].manufactured_for as string | null;
+    const manufacturerTouched =
+      d.manufacturedBy !== undefined ||
+      d.manufacturedFor !== undefined ||
+      d.manufacturerProfileId !== undefined;
+
+    if (d.manufacturerProfileId !== undefined) {
+      nextManufacturerProfileId = d.manufacturerProfileId;
+    }
+    if (d.manufacturerProfileId) {
+      const prof = await client.query(
+        `SELECT manufactured_by, manufactured_for FROM lab_manufacturer_profiles
+         WHERE id = $1 AND lab_id = $2`,
+        [d.manufacturerProfileId, labId],
+      );
+      if (prof.rows[0]) {
+        nextManufacturedBy =
+          d.manufacturedBy !== undefined ? d.manufacturedBy : prof.rows[0].manufactured_by;
+        nextManufacturedFor =
+          d.manufacturedFor !== undefined ? d.manufacturedFor : prof.rows[0].manufactured_for;
+      }
+    } else if (d.manufacturerProfileId === null) {
+      if (d.manufacturedBy !== undefined) nextManufacturedBy = d.manufacturedBy;
+      if (d.manufacturedFor !== undefined) nextManufacturedFor = d.manufacturedFor;
+    } else {
+      if (d.manufacturedBy !== undefined) nextManufacturedBy = d.manufacturedBy;
+      if (d.manufacturedFor !== undefined) nextManufacturedFor = d.manufacturedFor;
+    }
 
     const updated = await client.query(
       `UPDATE formulas SET
@@ -446,14 +563,15 @@ formulasRouter.patch("/v1/formulas/:id", requireAuth, requireWrite, async (req, 
         formula_type = COALESCE($13, formula_type),
         show_logo = COALESCE($14, show_logo),
         show_watermark = COALESCE($15, show_watermark),
-        manufactured_by = COALESCE($16, manufactured_by),
-        manufactured_for = COALESCE($17, manufactured_for),
-        sweetener = COALESCE($18, sweetener),
-        rsa = COALESCE($19, rsa),
-        flavor = COALESCE($20, flavor),
-        usage_mode = COALESCE($21, usage_mode),
-        storage_mode = COALESCE($22, storage_mode),
-        meta = COALESCE($23::jsonb, meta),
+        manufactured_by = CASE WHEN $24 THEN $16 ELSE manufactured_by END,
+        manufactured_for = CASE WHEN $24 THEN $17 ELSE manufactured_for END,
+        manufacturer_profile_id = CASE WHEN $24 THEN $18 ELSE manufacturer_profile_id END,
+        sweetener = COALESCE($19, sweetener),
+        rsa = COALESCE($20, rsa),
+        flavor = COALESCE($21, flavor),
+        usage_mode = COALESCE($22, usage_mode),
+        storage_mode = COALESCE($23, storage_mode),
+        meta = COALESCE($25::jsonb, meta),
         updated_at = now()
       WHERE id = $1 AND lab_id = $2
       RETURNING *`,
@@ -473,8 +591,9 @@ formulasRouter.patch("/v1/formulas/:id", requireAuth, requireWrite, async (req, 
         d.formulaType ?? null,
         d.showLogo ?? null,
         d.showWatermark ?? null,
-        d.manufacturedBy === undefined ? null : d.manufacturedBy,
-        d.manufacturedFor === undefined ? null : d.manufacturedFor,
+        nextManufacturedBy,
+        nextManufacturedFor,
+        nextManufacturerProfileId,
         d.containsSweetener === undefined
           ? null
           : d.containsSweetener
@@ -484,6 +603,7 @@ formulasRouter.patch("/v1/formulas/:id", requireAuth, requireWrite, async (req, 
         d.flavor === undefined ? null : d.flavor?.trim() || "",
         d.usageMode === undefined ? null : d.usageMode?.trim() || "",
         d.storageMode === undefined ? null : d.storageMode?.trim() || "",
+        manufacturerTouched,
         labelMetaTouched ? JSON.stringify(nextMeta) : null,
       ],
     );

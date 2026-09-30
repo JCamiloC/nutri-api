@@ -38,7 +38,7 @@ export const MACROS: NutrientDef[] = [
   { id: "grasaMono", nombre: "Grasa monoinsaturada", obligatorio: false, section: "macro", unidad: "g", indent: 1 },
   { id: "grasaPoli", nombre: "Grasa poliinsaturada", obligatorio: false, section: "macro", unidad: "g", indent: 1 },
   { id: "grasaTrans", nombre: "Grasa trans", obligatorio: true, section: "macro", unidad: "mg", indent: 1, bold: true },
-  { id: "colesterol", nombre: "Colesterol", obligatorio: false, section: "macro", unidad: "g" },
+  { id: "colesterol", nombre: "Colesterol", obligatorio: false, section: "macro", unidad: "mg" },
   { id: "carbohidratos", nombre: "Carbohidratos totales", obligatorio: true, section: "macro", unidad: "g" },
   { id: "fibra", nombre: "Fibra dietaria", obligatorio: true, section: "macro", unidad: "g", indent: 1 },
   { id: "fibraSol", nombre: "Fibra soluble", obligatorio: false, section: "macro", unidad: "g", indent: 2 },
@@ -233,10 +233,16 @@ function cleanZero(str: string): string {
   return n === 0 ? "0" : str.replace(/^-0(\.0+)?$/, "0");
 }
 
+/** Valores menores a 0,5 en rotulado se expresan como 0 (Res. 810, redondeo declaración). */
+function belowHalfToZero(n: number): boolean {
+  return n > 0 && n < 0.5;
+}
+
 /** formatValue de imprimirReceta (macros) */
 export function formatMacroValue(value: number): string {
   const n = num(value);
   if (n === 0) return "0";
+  if (belowHalfToZero(n)) return "0";
   if (n > 0 && n < 10) return cleanZero(n.toFixed(1));
   if (n >= 10) return cleanZero(n.toFixed(0));
   return cleanZero(String(n));
@@ -246,6 +252,7 @@ export function formatMacroValue(value: number): string {
 export function formatMicroValue(value: number): string {
   const n = num(value);
   if (n === 0) return "0";
+  if (belowHalfToZero(n)) return "0";
   if (n > 0 && n < 1) return cleanZero(n.toFixed(2));
   if (n > 1 && n < 10) return cleanZero(n.toFixed(1));
   if (n >= 10) return cleanZero(n.toFixed(0));
@@ -386,7 +393,16 @@ export function recalculateFormula(input: RecalculateInput): RecalculateResult {
     if (line.per100g && typeof (line.per100g as { alergenos?: unknown }).alergenos === "object") {
       const raw = (line.per100g as { alergenos?: Record<string, unknown> }).alergenos ?? {};
       for (const [key, value] of Object.entries(raw)) {
-        if (value && !(key in allergens)) allergens[key] = value;
+        if (value === false || value === null || value === undefined) continue;
+        if (Array.isArray(value) && value.length === 0) continue;
+        if (!(key in allergens)) {
+          allergens[key] = value;
+          continue;
+        }
+        const prev = allergens[key];
+        if (Array.isArray(prev) && Array.isArray(value)) {
+          allergens[key] = [...new Set([...prev.map(String), ...value.map(String)])];
+        }
       }
     }
 
