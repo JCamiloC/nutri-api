@@ -22,6 +22,7 @@ import { labLogoPublicPath } from "../lib/uploads.js";
 import { requireAuth, requireWrite } from "../middleware/auth.js";
 import {
   recalculateFormula,
+  type FormulaLine,
   type FormulaType,
   type IngredientSource,
 } from "../nutrition-engine/index.js";
@@ -134,17 +135,32 @@ formulasRouter.get("/v1/formulas/:id", requireAuth, async (req, res) => {
     ];
     const ownershipByIngredient = new Map<
       string,
-      { ownership: "verified" | "mine" | "other"; isBase: boolean }
+      {
+        ownership: "verified" | "mine" | "other";
+        isBase: boolean;
+        technologicalFunction: string | null;
+        technologicalFunctionNotes: string | null;
+      }
     >();
     if (ingredientIds.length > 0) {
       const ingRes = await pool.query(
-        `SELECT id, source, is_base, lab_id, created_by_user_id FROM ingredients WHERE id = ANY($1::uuid[])`,
+        `SELECT id, source, is_base, lab_id, created_by_user_id, technological_function,
+                technological_function_notes
+         FROM ingredients WHERE id = ANY($1::uuid[])`,
         [ingredientIds],
       );
       for (const row of ingRes.rows) {
         ownershipByIngredient.set(String(row.id), {
           ownership: ownershipKind(row, viewer),
           isBase: row.is_base === true,
+          technologicalFunction:
+            row.technological_function != null
+              ? String(row.technological_function)
+              : null,
+          technologicalFunctionNotes:
+            row.technological_function_notes != null
+              ? String(row.technological_function_notes)
+              : null,
         });
       }
     }
@@ -156,7 +172,13 @@ formulasRouter.get("/v1/formulas/:id", requireAuth, async (req, res) => {
         const ingId = row.ingredient_id ? String(row.ingredient_id) : null;
         const own = ingId ? ownershipByIngredient.get(ingId) : undefined;
         return own
-          ? { ...mapped, ownership: own.ownership, isBase: own.isBase }
+          ? {
+              ...mapped,
+              ownership: own.ownership,
+              isBase: own.isBase,
+              technologicalFunction: own.technologicalFunction,
+              technologicalFunctionNotes: own.technologicalFunctionNotes,
+            }
           : mapped;
       }),
       labBranding: await loadLabBranding(labId, req),
@@ -717,21 +739,26 @@ formulasRouter.post("/v1/formulas/:id/recalculate", requireAuth, requireWrite, a
       return res.status(400).json({ error: "validation_failed", issues });
     }
 
-    const engineLines: Array<{
-      source: IngredientSource;
-      name: string;
-      percent: number;
-      per100g: ReturnType<typeof ingredientToPer100g>;
-    }> = [];
+    const engineLines: FormulaLine[] = [];
 
     for (const line of linesRes.rows) {
       let per100g = ingredientToPer100g({});
+      let technologicalFunction: string | null = null;
+      let technologicalFunctionNotes: string | null = null;
       if (line.ingredient_id) {
         const ing = await pool.query(`SELECT * FROM ingredients WHERE id = $1`, [
           line.ingredient_id,
         ]);
         if (ing.rows[0] && canResolveIngredientForFormula(ing.rows[0], labId)) {
           per100g = ingredientToPer100g(ing.rows[0]);
+          technologicalFunction =
+            ing.rows[0].technological_function != null
+              ? String(ing.rows[0].technological_function)
+              : null;
+          technologicalFunctionNotes =
+            ing.rows[0].technological_function_notes != null
+              ? String(ing.rows[0].technological_function_notes)
+              : null;
         }
       }
 
@@ -740,6 +767,8 @@ formulasRouter.post("/v1/formulas/:id/recalculate", requireAuth, requireWrite, a
         name: String(line.name),
         percent: Number(line.percent) || 0,
         per100g,
+        technologicalFunction,
+        technologicalFunctionNotes,
       });
     }
 
@@ -837,22 +866,27 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
       return res.status(400).json({ error: "validation_failed", issues });
     }
 
-    const engineLines: Array<{
-      source: IngredientSource;
-      name: string;
-      percent: number;
-      per100g: ReturnType<typeof ingredientToPer100g>;
-    }> = [];
+    const engineLines: FormulaLine[] = [];
     const snapshotLines: Array<Record<string, unknown>> = [];
 
     for (const line of linesRes.rows) {
       let per100g = ingredientToPer100g({});
+      let technologicalFunction: string | null = null;
+      let technologicalFunctionNotes: string | null = null;
       if (line.ingredient_id) {
         const ing = await client.query(`SELECT * FROM ingredients WHERE id = $1`, [
           line.ingredient_id,
         ]);
         if (ing.rows[0] && canResolveIngredientForFormula(ing.rows[0], labId)) {
           per100g = ingredientToPer100g(ing.rows[0]);
+          technologicalFunction =
+            ing.rows[0].technological_function != null
+              ? String(ing.rows[0].technological_function)
+              : null;
+          technologicalFunctionNotes =
+            ing.rows[0].technological_function_notes != null
+              ? String(ing.rows[0].technological_function_notes)
+              : null;
         }
       }
       engineLines.push({
@@ -860,6 +894,8 @@ formulasRouter.post("/v1/formulas/:id/print", requireAuth, requireWrite, async (
         name: String(line.name),
         percent: Number(line.percent) || 0,
         per100g,
+        technologicalFunction,
+        technologicalFunctionNotes,
       });
       snapshotLines.push({
         ingredientId: line.ingredient_id,

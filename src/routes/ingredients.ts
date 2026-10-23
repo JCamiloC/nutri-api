@@ -13,7 +13,9 @@ import {
   peekIngredientCode,
 } from "../lib/ingredient-code.js";
 import { mapIngredient, resolveLabId } from "../lib/mappers.js";
+import { TECHNOLOGICAL_FUNCTION_OTHER } from "../lib/technological-functions.js";
 import { requireAuth, requireWrite } from "../middleware/auth.js";
+import { likePattern, sqlAccentInsensitiveLike } from "../lib/search-text.js";
 
 export const ingredientsRouter = Router();
 
@@ -56,10 +58,11 @@ ingredientsRouter.get("/v1/ingredients", requireAuth, async (req, res) => {
     }
 
     if (q) {
-      params.push(`%${q}%`);
+      params.push(likePattern(q));
+      const nameMatch = sqlAccentInsensitiveLike("nombre", params.length);
       const result = await pool.query(
         `SELECT * FROM ingredients
-         WHERE ${visibility}${scopeSql} AND nombre ILIKE $${params.length}
+         WHERE ${visibility}${scopeSql} AND ${nameMatch}
          ORDER BY is_base DESC, source ASC, nombre ASC
          LIMIT 200`,
         params,
@@ -145,12 +148,68 @@ const createBody = z.object({
   containsSweetener: z.boolean(),
   isAdditive: z.boolean().optional().default(false),
   technologicalFunction: z.string().optional().nullable(),
+  technologicalFunctionNotes: z.string().optional().nullable(),
 });
+
+type TechnologicalPatch = {
+  apply: boolean;
+  fn: string | null;
+  notes: string | null;
+};
+
+/** Valores finales de función/observaciones en PATCH (evita CASE con parámetros sin tipo en Postgres). */
+function resolveTechnologicalPatch(
+  row: { technological_function?: unknown; technological_function_notes?: unknown },
+  d: {
+    isAdditive?: boolean;
+    technologicalFunction?: string | null;
+    technologicalFunctionNotes?: string | null;
+  },
+): TechnologicalPatch {
+  if (d.isAdditive === false) {
+    return { apply: true, fn: null, notes: null };
+  }
+
+  const fnTouched = d.technologicalFunction !== undefined;
+  const notesTouched = d.technologicalFunctionNotes !== undefined;
+
+  if (!fnTouched && !notesTouched) {
+    return { apply: false, fn: null, notes: null };
+  }
+
+  if (fnTouched) {
+    const fn = d.technologicalFunction?.trim() || null;
+    if (fn !== TECHNOLOGICAL_FUNCTION_OTHER) {
+      return { apply: true, fn, notes: null };
+    }
+    const notes = notesTouched
+      ? d.technologicalFunctionNotes?.trim() || null
+      : row.technological_function_notes != null
+        ? String(row.technological_function_notes)
+        : null;
+    return { apply: true, fn, notes };
+  }
+
+  if (notesTouched) {
+    const existingFn =
+      row.technological_function != null ? String(row.technological_function) : null;
+    if (existingFn === TECHNOLOGICAL_FUNCTION_OTHER) {
+      return {
+        apply: true,
+        fn: existingFn,
+        notes: d.technologicalFunctionNotes?.trim() || null,
+      };
+    }
+  }
+
+  return { apply: false, fn: null, notes: null };
+}
 
 const ingredientBodyRefine = (
   data: {
     isAdditive?: boolean;
     technologicalFunction?: string | null;
+    technologicalFunctionNotes?: string | null;
   },
   ctx: z.RefinementCtx,
 ) => {
@@ -159,6 +218,18 @@ const ingredientBodyRefine = (
       code: z.ZodIssueCode.custom,
       message: "technological_function_required",
       path: ["technologicalFunction"],
+    });
+  }
+  const fn = String(data.technologicalFunction ?? "").trim();
+  if (
+    data.isAdditive &&
+    fn === TECHNOLOGICAL_FUNCTION_OTHER &&
+    !String(data.technologicalFunctionNotes ?? "").trim()
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "technological_function_notes_required",
+      path: ["technologicalFunctionNotes"],
     });
   }
 };
@@ -184,6 +255,11 @@ ingredientsRouter.post("/v1/ingredients", requireAuth, requireWrite, async (req,
   try {
     const pool = getPool();
     const codigo = await allocateIngredientCode(pool, labId);
+    const techFn = d.isAdditive ? d.technologicalFunction?.trim() || null : null;
+    const techNotes =
+      d.isAdditive && techFn === TECHNOLOGICAL_FUNCTION_OTHER
+        ? d.technologicalFunctionNotes?.trim() || null
+        : null;
     const result = await pool.query(
       `INSERT INTO ingredients (
         lab_id, source, referencia, nombre, read_only, is_base, created_by_user_id,
@@ -192,7 +268,7 @@ ingredientsRouter.post("/v1/ingredients", requireAuth, requireWrite, async (req,
         colesterol, sodio, potasio, carbohidratos, fibra, fibra_sol, fibra_insol,
         polialcoholes, azucar, azucar_add, proteina, energia_kcal,
         vitaminas, alergenos,
-        contains_sweetener, is_additive, technological_function
+        contains_sweetener, is_additive, technological_function, technological_function_notes
       ) VALUES (
         $1,$2,$3,$4,$5,false,$6,
         $7,$8,$9,$10,$11,$12,$13,
@@ -200,7 +276,7 @@ ingredientsRouter.post("/v1/ingredients", requireAuth, requireWrite, async (req,
         $19,$20,$21,$22,$23,$24,$25,
         $26,$27,$28,$29,$30,
         $31::jsonb,$32::jsonb,
-        $33,$34,$35
+        $33,$34,$35,$36
       ) RETURNING *`,
       [
         labId,
@@ -237,7 +313,8 @@ ingredientsRouter.post("/v1/ingredients", requireAuth, requireWrite, async (req,
         JSON.stringify(d.alergenos ?? {}),
         d.containsSweetener,
         d.isAdditive ?? false,
-        d.isAdditive ? (d.technologicalFunction?.trim() || null) : null,
+        techFn,
+        techNotes,
       ],
     );
 
@@ -287,7 +364,7 @@ ingredientsRouter.post(
           colesterol, sodio, potasio, carbohidratos, fibra, fibra_sol, fibra_insol,
           polialcoholes, azucar, azucar_add, proteina, energia_kcal,
           vitaminas, alergenos, aminoacidos,
-          contains_sweetener, is_additive, technological_function
+          contains_sweetener, is_additive, technological_function, technological_function_notes
         )
         SELECT
           $1, 'BD', $5, $2, false, false,
@@ -297,7 +374,7 @@ ingredientsRouter.post(
           colesterol, sodio, potasio, carbohidratos, fibra, fibra_sol, fibra_insol,
           polialcoholes, azucar, azucar_add, proteina, energia_kcal,
           vitaminas, alergenos, aminoacidos,
-          contains_sweetener, is_additive, technological_function
+          contains_sweetener, is_additive, technological_function, technological_function_notes
         FROM ingredients WHERE id = $4
         RETURNING *`,
         [labId, copyName, viewer.id, src.id, codigo],
@@ -361,6 +438,7 @@ ingredientsRouter.patch("/v1/ingredients/:id", requireAuth, requireWrite, async 
     }
 
     const d = parsed.data;
+    const tech = resolveTechnologicalPatch(row, d);
     const result = await getPool().query(
       `UPDATE ingredients SET
         nombre = COALESCE($2, nombre),
@@ -392,9 +470,12 @@ ingredientsRouter.patch("/v1/ingredients/:id", requireAuth, requireWrite, async 
         contains_sweetener = COALESCE($28, contains_sweetener),
         is_additive = COALESCE($29, is_additive),
         technological_function = CASE
-          WHEN $29 IS NOT NULL AND $29 = false THEN NULL
-          WHEN $30 IS NOT NULL THEN $30
+          WHEN $30 = true THEN $31::text
           ELSE technological_function
+        END,
+        technological_function_notes = CASE
+          WHEN $30 = true THEN $32::text
+          ELSE technological_function_notes
         END,
         updated_at = now()
       WHERE id = $1
@@ -429,11 +510,9 @@ ingredientsRouter.patch("/v1/ingredients/:id", requireAuth, requireWrite, async 
         d.alergenos ? JSON.stringify(d.alergenos) : null,
         d.containsSweetener ?? null,
         d.isAdditive ?? null,
-        d.isAdditive === false
-          ? null
-          : d.technologicalFunction === undefined
-            ? null
-            : d.technologicalFunction?.trim() || null,
+        tech.apply,
+        tech.fn,
+        tech.notes,
       ],
     );
 

@@ -1,3 +1,4 @@
+import { formatIngredientListEntry } from "../lib/ingredient-list-format.js";
 import {
   computeWarningSeals,
   nutrientPer100,
@@ -159,6 +160,9 @@ export interface FormulaLine {
   source: IngredientSource;
   name: string;
   percent: number;
+  /** Función tecnológica (aditivos) — rotulado entre paréntesis. */
+  technologicalFunction?: string | null;
+  technologicalFunctionNotes?: string | null;
   /** Nutrientes del ingrediente por 100 g (campos Enerxis: grasas, proteina, …). */
   per100g: NutrientProfile;
 }
@@ -366,7 +370,12 @@ export function recalculateFormula(input: RecalculateInput): RecalculateResult {
   let caloriesBase = 0;
   let percentTotal = 0;
   const allergens: Record<string, unknown> = {};
-  const ingredientAmounts: Array<{ name: string; amount: number }> = [];
+  const ingredientAmounts: Array<{
+    name: string;
+    amount: number;
+    technologicalFunction?: string | null;
+    technologicalFunctionNotes?: string | null;
+  }> = [];
 
   for (const line of input.lines) {
     const factor = num(line.percent) / 100;
@@ -406,7 +415,12 @@ export function recalculateFormula(input: RecalculateInput): RecalculateResult {
       }
     }
 
-    ingredientAmounts.push({ name: line.name, amount: factor });
+    ingredientAmounts.push({
+      name: line.name,
+      amount: factor,
+      technologicalFunction: line.technologicalFunction,
+      technologicalFunctionNotes: line.technologicalFunctionNotes,
+    });
   }
 
   const scales = scaleFactors(input);
@@ -455,7 +469,14 @@ export function recalculateFormula(input: RecalculateInput): RecalculateResult {
   const { legend, items: legendItems } = buildLegend(nutrients);
   const ingredientList = ingredientAmounts
     .sort((a, b) => b.amount - a.amount)
-    .map((i) => i.name)
+    .map((i) =>
+      formatIngredientListEntry(
+        i.name,
+        i.technologicalFunction,
+        i.technologicalFunctionNotes,
+      ),
+    )
+    .filter(Boolean)
     .join(", ");
 
   const { seals: sealsSuggested, metrics: sealMetrics } = computeWarningSeals({

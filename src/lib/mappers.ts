@@ -146,6 +146,10 @@ export function mapIngredient(
     isAdditive: row.is_additive === true,
     technologicalFunction:
       row.technological_function != null ? String(row.technological_function) : null,
+    technologicalFunctionNotes:
+      row.technological_function_notes != null
+        ? String(row.technological_function_notes)
+        : null,
     tipo: row.tipo,
     readOnly: !editable,
     isBase: row.is_base === true,

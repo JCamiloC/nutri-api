@@ -7,6 +7,7 @@ import { upsertReadOnlyIngredient } from "../lib/ingredient-upsert.js";
 import { resolveLabId } from "../lib/mappers.js";
 import { fetchUsdaFood, searchUsdaFoods } from "../lib/usda.js";
 import { requireAuth, requireWrite } from "../middleware/auth.js";
+import { likePattern, sqlAccentInsensitiveLike } from "../lib/search-text.js";
 
 export const catalogRouter = Router();
 
@@ -46,13 +47,15 @@ catalogRouter.get("/v1/catalog/icbf", requireAuth, async (req, res) => {
     const total = await pool.query(`SELECT count(*)::int AS n FROM icbf_foods`);
     const empty = (total.rows[0]?.n ?? 0) === 0;
 
+    const pattern = likePattern(q);
+    const icbfNameMatch = sqlAccentInsensitiveLike("nombre", 1);
     const result = q
       ? await pool.query(
           `SELECT * FROM icbf_foods
-           WHERE nombre ILIKE $1 OR codigo ILIKE $1
+           WHERE ${icbfNameMatch} OR codigo ILIKE $1
            ORDER BY nombre ASC
            LIMIT 50`,
-          [`%${q}%`],
+          [pattern],
         )
       : await pool.query(
           `SELECT * FROM icbf_foods ORDER BY nombre ASC LIMIT 40`,
