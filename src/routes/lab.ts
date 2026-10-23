@@ -5,6 +5,7 @@ import { getPool } from "../db/pool.js";
 import { writeAudit } from "../lib/audit.js";
 import { resolveLabId } from "../lib/mappers.js";
 import { getLabCapacity } from "../lib/quota.js";
+import { ensureLabLogoPrintPng } from "../lib/lab-logo-print.js";
 import {
   ensureLabLogoDir,
   extFromMime,
@@ -207,6 +208,7 @@ labRouter.post("/v1/lab/logo", requireAuth, requireWrite, async (req, res) => {
     ensureLabLogoDir(labId);
     removeLabLogoFiles(labId);
     fs.writeFileSync(labLogoPath(labId, ext), buffer);
+    await ensureLabLogoPrintPng(labId, ext);
 
     const result = await getPool().query(
       `UPDATE labs SET logo_ext = $2, updated_at = now() WHERE id = $1 RETURNING *`,

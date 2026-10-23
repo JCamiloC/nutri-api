@@ -1,9 +1,11 @@
 /** Validaciones de fórmula alineadas a Enerxis. */
 
-export const PERCENT_TOLERANCE = 0.01;
+/** Misma regla que el front: 100,000 % en 3 decimales (99,99 % no cuenta). */
+export const PERCENT_DISPLAY_DECIMALS = 3;
 
 export function isPercentComplete(total: number): boolean {
-  return Math.abs(total - 100) <= PERCENT_TOLERANCE;
+  if (!Number.isFinite(total)) return false;
+  return Number(total.toFixed(PERCENT_DISPLAY_DECIMALS)) === 100;
 }
 
 export type FormulaValidationIssue = {

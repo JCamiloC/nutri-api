@@ -1,3 +1,4 @@
+import { isPercentComplete } from "../lib/formula-validation.js";
 import { formatIngredientListEntry } from "../lib/ingredient-list-format.js";
 import {
   computeWarningSeals,
@@ -322,6 +323,12 @@ function scaleFactors(input: RecalculateInput): { per100: number; perServing: nu
   };
 }
 
+/** Valor declarado per 100 en «0» (redondeo Res. 810, p. ej. < 0,5 g → 0). */
+function isDeclaredZeroPer100Label(label: string): boolean {
+  const v = parseFloat(String(label ?? "0").trim().replace(",", "."));
+  return !Number.isFinite(v) || v === 0;
+}
+
 function buildLegend(nutrients: NutrientRowResult[]): { legend: string; items: string[] } {
   const items: string[] = [];
 
@@ -340,19 +347,19 @@ function buildLegend(nutrients: NutrientRowResult[]): { legend: string; items: s
 
   for (const id of mandatoryMacroIds) {
     const row = nutrients.find((n) => n.id === id);
-    if (row && num(row.per100) === 0) items.push(row.label);
+    if (row && isDeclaredZeroPer100Label(row.per100Label)) items.push(row.label);
   }
 
   // Macros opcionales “no aplica” frecuentes en etiquetas Enerxis
   for (const id of ["colesterol", "fibraSol", "fibraInsol", "polialcoholes", "potasio"]) {
     const row = nutrients.find((n) => n.id === id);
-    if (row && num(row.per100) === 0) items.push(row.label);
+    if (row && isDeclaredZeroPer100Label(row.per100Label)) items.push(row.label);
   }
 
   // Micros en 0 → leyenda (misma lógica que el bloque vitaminaA/D/… del legacy)
   for (const micro of MICROS) {
     const row = nutrients.find((n) => n.id === micro.id);
-    if (row && num(row.per100) === 0) items.push(row.label);
+    if (row && isDeclaredZeroPer100Label(row.per100Label)) items.push(row.label);
   }
 
   const legend =
@@ -489,7 +496,7 @@ export function recalculateFormula(input: RecalculateInput): RecalculateResult {
 
   return {
     percentTotal,
-    percentComplete: Math.abs(percentTotal - 100) < 0.01,
+    percentComplete: isPercentComplete(percentTotal),
     caloriesPer100,
     caloriesPerServing,
     nutrients,

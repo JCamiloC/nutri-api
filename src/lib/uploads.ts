@@ -50,7 +50,7 @@ export function removeLabLogoFiles(labId: string) {
   const dir = labLogoDir(labId);
   if (!fs.existsSync(dir)) return;
   for (const file of fs.readdirSync(dir)) {
-    if (file.startsWith("logo.")) {
+    if (file.startsWith("logo.") || file === "logo-print.png") {
       fs.unlinkSync(path.join(dir, file));
     }
   }

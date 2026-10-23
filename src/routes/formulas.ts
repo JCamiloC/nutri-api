@@ -18,7 +18,7 @@ import {
 import { ingredientToPer100g } from "../lib/ingredient-profile.js";
 import { mapFormula, mapFormulaLine, resolveLabId } from "../lib/mappers.js";
 import { getLabCapacity } from "../lib/quota.js";
-import { labLogoPublicPath } from "../lib/uploads.js";
+import { labLogoLabelPublicPath } from "../lib/lab-logo-print.js";
 import { requireAuth, requireWrite } from "../middleware/auth.js";
 import {
   recalculateFormula,
@@ -54,7 +54,7 @@ async function loadLabBranding(
   const lab = await pool.query(`SELECT * FROM labs WHERE id = $1`, [labId]);
   const row = lab.rows[0];
   if (!row) return null;
-  const logoPath = labLogoPublicPath(labId, row.logo_ext as string | null);
+  const logoPath = labLogoLabelPublicPath(labId, row.logo_ext as string | null);
   const host = req.get("host");
   const base = host ? `${req.protocol}://${host}` : "";
   const { listManufacturerProfiles } = await import("../lib/lab-manufacturers.js");
